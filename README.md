@@ -23,7 +23,6 @@
 
 - MySQL 数据保存在 `data/mysql`
 - 上传的小说文件保存在 `data/uploads`
-- 后端通过业务账号连接 MySQL，不再直接使用 `root`
 
 ## 一、准备环境变量
 
