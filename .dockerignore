@@ -1,0 +1,11 @@
+.git
+.vscode
+**/__pycache__
+**/*.pyc
+frontend/node_modules
+frontend/dist
+backend/uploads
+uploads
+chapters
+*.log
+.env
