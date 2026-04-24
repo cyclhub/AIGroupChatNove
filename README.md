@@ -34,13 +34,11 @@ cp .env.example .env
 ```
 
 然后修改 `.env`：
-
+下面配置可以不用修改，会独立创建一个mysql数据库，前端端口自定义
 ```env
 APP_PORT=9000
-MYSQL_ROOT_PASSWORD=请改成你的root密码
+MYSQL_ROOT_PASSWORD=your_password
 MYSQL_APP_USER=aixs_user
-MYSQL_APP_PASSWORD=请改成你的业务库密码
-MYSQL_DATABASE=aixs
 ```
 
 参数说明：
@@ -48,11 +46,9 @@ MYSQL_DATABASE=aixs
 - `APP_PORT`：前端对外访问端口
 - `MYSQL_ROOT_PASSWORD`：MySQL root 密码，仅数据库初始化和管理使用
 - `MYSQL_APP_USER`：项目后端连接数据库使用的业务账号
-- `MYSQL_APP_PASSWORD`：业务账号密码
-- `MYSQL_DATABASE`：项目数据库名
 
 ## 二、首次部署
-
+保证安装了docker compose
 在项目根目录执行：
 
 ```bash
