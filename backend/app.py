@@ -906,15 +906,26 @@ def get_process_status(novel_id):
     with running_jobs_lock:
         job = running_jobs.get(novel_id)
         is_running = job is not None
+    changed = False
     if processed_count != novel.processed_chapters:
         novel.processed_chapters = processed_count
-    if is_running and novel.status != "processing":
-        novel.status = "processing"
-    if processed_count != novel.processed_chapters or is_running:
-        db.session.commit()
+        changed = True
 
     task_total = int(job.get("total", 0)) if job else 0
     task_completed = int(job.get("completed", 0)) if job else 0
+    task_finished = bool(task_total and task_completed >= task_total)
+    novel_finished = bool(novel.total_chapters and processed_count >= novel.total_chapters)
+
+    if is_running and not task_finished and novel.status not in {"failed", "cancelled", "completed", "split"}:
+        novel.status = "processing"
+        changed = True
+    elif not is_running and novel.status == "processing":
+        novel.status = "completed" if novel_finished else "split"
+        changed = True
+
+    if changed:
+        db.session.commit()
+
     progress_base = task_total if is_running and task_total else novel.total_chapters
     progress_value = task_completed if is_running and task_total else processed_count
     progress = round(progress_value / progress_base * 100, 2) if progress_base else 0
