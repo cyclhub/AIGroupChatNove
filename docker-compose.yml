@@ -68,14 +68,6 @@ services:
       - aixiaoshuo-network
     environment:
       TZ: Asia/Shanghai
-    healthcheck:
-      test: ["CMD-SHELL", "wget -q --spider http://localhost:80 || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 10s
-
-# 注意：由于使用了 bind mount，不再需要顶层 volumes 定义
 
 networks:
   aixiaoshuo-network:
