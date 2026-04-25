@@ -454,6 +454,7 @@ const showReaderQuickPanel = ref(false)
 const dialogueRevealMode = ref('scroll')
 const restoringProgress = ref(false)
 const restoringReaderSnapshot = ref(false)
+const restoringProgressState = ref(null)
 const readingProgressKeyBase = 'ai_chat_novel_progress'
 const prevOriginalLoading = ref(false)
 const nextOriginalLoading = ref(false)
@@ -909,6 +910,7 @@ const resetReaderState = () => {
   loadedOriginalChapterIds.value = new Set()
   firstOriginalChapter.value = null
   lastOriginalChapter.value = null
+  restoringProgressState.value = null
 }
 
 const loadChapterForReader = async (chapter, append) => {
@@ -957,8 +959,12 @@ const loadChapterForReader = async (chapter, append) => {
         lastLoadedChapter.value = chapter
       } else {
         allDialogues.value = chapterItems
+        const restoredVisibleCount = restoringProgressState.value?.dialogueRestoreCount || 0
+        const initialVisibleCount = restoringReaderSnapshot.value
+          ? restoredVisibleCount
+          : (dialogueRevealMode.value === 'tap' ? tapRevealInitialCount : messageBatchSize)
         visibleMessageCount.value = Math.min(
-          restoringReaderSnapshot.value ? allDialogues.value.length : (dialogueRevealMode.value === 'tap' ? tapRevealInitialCount : messageBatchSize),
+          Math.max(initialVisibleCount, 0),
           allDialogues.value.length,
         )
         readerEnded.value = false
@@ -994,20 +1000,84 @@ const getReadingProgress = () => {
   }
 }
 
+const getDialogueAnchor = (scrollTarget, chapterId) => {
+  if (!scrollTarget || !chapterId) return null
+  const containerRect = scrollTarget.getBoundingClientRect()
+  const chapterPrefix = `${chapterId}-`
+  const items = Array.from(scrollTarget.querySelectorAll('[data-message-id]'))
+  const chapterItems = items.filter((item) => {
+    const messageId = String(item.dataset.messageId || '')
+    return messageId === `chapter-${chapterId}` || messageId.startsWith(chapterPrefix)
+  })
+  const anchorEl = chapterItems.find((item) => item.getBoundingClientRect().bottom >= containerRect.top + 8) || chapterItems[0]
+  if (!anchorEl) return null
+  return {
+    id: anchorEl.dataset.messageId,
+    offset: anchorEl.getBoundingClientRect().top - containerRect.top,
+  }
+}
+
+const getDialogueRestoreMessage = (scrollTarget, chapterId) => {
+  if (!scrollTarget || !chapterId) return null
+  const containerRect = scrollTarget.getBoundingClientRect()
+  const chapterPrefix = `${chapterId}-`
+  const items = Array.from(scrollTarget.querySelectorAll('[data-message-id]'))
+  const chapterItems = items.filter((item) => {
+    const messageId = String(item.dataset.messageId || '')
+    return messageId === `chapter-${chapterId}` || messageId.startsWith(chapterPrefix)
+  })
+  if (!chapterItems.length) return null
+
+  const visibleItems = chapterItems.filter((item) => {
+    const rect = item.getBoundingClientRect()
+    return rect.bottom >= containerRect.top + 12 && rect.top <= containerRect.bottom - 24
+  })
+
+  const restoreEl = visibleItems[visibleItems.length - 1] || chapterItems[Math.min(chapterItems.length - 1, visibleMessageCount.value - 1)] || chapterItems[0]
+  return restoreEl?.dataset.messageId || null
+}
+
+const getOriginalAnchor = (scrollTarget, chapterId) => {
+  if (!scrollTarget || !chapterId) return null
+  const chapterEl = scrollTarget.querySelector(`[data-original-id="${chapterId}"]`)
+  if (!chapterEl) return null
+  return {
+    chapterId,
+    offset: Math.max(0, scrollTarget.scrollTop - chapterEl.offsetTop),
+  }
+}
+
+const getChapterDialogueItems = (chapterId) => {
+  const chapterPrefix = `${chapterId}-`
+  return allDialogues.value.filter((item) => {
+    const messageId = String(item.id || '')
+    return messageId === `chapter-${chapterId}` || messageId.startsWith(chapterPrefix)
+  })
+}
+
 const saveReadingProgress = () => {
   if (!selectedNovel.value?.id || !selectedChapter.value?.id || currentPage.value !== 'content' || restoringProgress.value) return
   const progress = getReadingProgress()
   const scrollTarget = contentTab.value === 'dialogue' ? chatWindowRef.value : originalWindowRef.value
+  const dialogueAnchor = contentTab.value === 'dialogue' ? getDialogueAnchor(scrollTarget, selectedChapter.value.id) : null
+  const dialogueRestoreMessageId = contentTab.value === 'dialogue' ? getDialogueRestoreMessage(scrollTarget, selectedChapter.value.id) : null
+  const originalAnchor = contentTab.value === 'original' ? getOriginalAnchor(scrollTarget, selectedChapter.value.id) : null
+  const currentChapterDialogueItems = contentTab.value === 'dialogue' ? getChapterDialogueItems(selectedChapter.value.id) : []
+  const dialogueRestoreCount = contentTab.value === 'dialogue' && dialogueRestoreMessageId
+    ? Math.max(1, currentChapterDialogueItems.findIndex((item) => item.id === dialogueRestoreMessageId) + 1)
+    : 0
   progress[selectedNovel.value.id] = {
     chapterId: selectedChapter.value.id,
     mode: contentTab.value,
     dialogueRevealMode: dialogueRevealMode.value,
     scrollTop: scrollTarget?.scrollTop || 0,
     visibleMessageCount: visibleMessageCount.value,
-    dialogueFirstChapterId: firstLoadedChapter.value?.id || null,
-    dialogueLastChapterId: lastLoadedChapter.value?.id || null,
-    originalFirstChapterId: firstOriginalChapter.value?.id || null,
-    originalLastChapterId: lastOriginalChapter.value?.id || null,
+    dialogueRestoreCount,
+    dialogueRestoreMessageId,
+    dialogueAnchorMessageId: dialogueAnchor?.id || null,
+    dialogueAnchorOffset: dialogueAnchor?.offset || 0,
+    originalAnchorChapterId: originalAnchor?.chapterId || null,
+    originalAnchorOffset: originalAnchor?.offset || 0,
     updatedAt: Date.now(),
   }
   const key = `${readingProgressKeyBase}_${currentUser.value?.id || 'guest'}`
@@ -1020,28 +1090,25 @@ const restoreReadingProgress = async (novelId) => {
 
   restoringProgress.value = true
   restoringReaderSnapshot.value = true
+  restoringProgressState.value = progress
   try {
     dialogueRevealMode.value = progress.dialogueRevealMode || 'scroll'
     const detailRes = await axios.get(`/api/chapter/${progress.chapterId}`)
     await loadChapterForReader(detailRes.data, false)
     contentTab.value = progress.mode || 'dialogue'
     if (contentTab.value === 'dialogue' && detailRes.data.is_processed) {
-      await restoreDialogueSnapshot(progress)
-      visibleMessageCount.value = Math.min(progress.visibleMessageCount || allDialogues.value.length, allDialogues.value.length)
+      await loadPrevProcessedChapter(null, { restoring: true })
+      await restoreDialogueAnchor(progress)
     }
     if (contentTab.value === 'original') {
-      await restoreOriginalSnapshot(progress)
+      await loadPrevOriginalChapter(null, { restoring: true })
+      await restoreOriginalAnchor(progress)
     }
     await nextTick()
-    const scrollTarget = contentTab.value === 'dialogue' ? chatWindowRef.value : originalWindowRef.value
-    if (scrollTarget) {
-      scrollTarget.scrollTop = Math.max(0, progress.scrollTop || 0)
-      await waitForNextFrame()
-      scrollTarget.scrollTop = Math.max(0, progress.scrollTop || 0)
-    }
   } catch (error) {
     // 阅读记录失效时忽略，仍停留在章节列表。
   } finally {
+    restoringProgressState.value = null
     restoringReaderSnapshot.value = false
     restoringProgress.value = false
   }
@@ -1058,46 +1125,45 @@ const goBack = () => {
   }
 }
 
-const restoreDialogueSnapshot = async (progress) => {
-  const targetFirstId = progress.dialogueFirstChapterId || firstLoadedChapter.value?.id
-  const targetLastId = progress.dialogueLastChapterId || lastLoadedChapter.value?.id
-
-  let guard = 0
-  while (firstLoadedChapter.value?.id && targetFirstId && firstLoadedChapter.value.id !== targetFirstId && guard < 80) {
-    const beforeId = firstLoadedChapter.value.id
-    await loadPrevProcessedChapter(null, { restoring: true })
-    if (firstLoadedChapter.value?.id === beforeId) break
-    guard += 1
+const restoreDialogueAnchor = async (progress) => {
+  const scrollTarget = chatWindowRef.value
+  if (!scrollTarget) return
+  const currentChapterId = progress.chapterId
+  const chapterItems = getChapterDialogueItems(currentChapterId)
+  const chapterStartIndex = chapterItems.length
+    ? allDialogues.value.findIndex((item) => item.id === chapterItems[0].id)
+    : -1
+  const restoreMessageId = progress.dialogueRestoreMessageId
+  const restoreMessageIndex = restoreMessageId
+    ? allDialogues.value.findIndex((item) => item.id === restoreMessageId)
+    : -1
+  if (restoreMessageIndex >= 0) {
+    visibleMessageCount.value = Math.min(allDialogues.value.length, restoreMessageIndex + 1)
+  } else {
+    visibleMessageCount.value = Math.min(
+      allDialogues.value.length,
+      chapterStartIndex >= 0 ? chapterStartIndex + (progress.dialogueRestoreCount || 0) : (progress.dialogueRestoreCount || 0),
+    )
   }
-
-  guard = 0
-  while (lastLoadedChapter.value?.id && targetLastId && lastLoadedChapter.value.id !== targetLastId && guard < 80) {
-    const beforeId = lastLoadedChapter.value.id
-    await loadNextProcessedChapter({ restoring: true })
-    if (lastLoadedChapter.value?.id === beforeId) break
-    guard += 1
-  }
+  await nextTick()
+  scrollTarget.scrollTop = scrollTarget.scrollHeight
+  await waitForNextFrame()
+  scrollTarget.scrollTop = scrollTarget.scrollHeight
+  await waitForNextFrame()
+  scrollTarget.scrollTop = scrollTarget.scrollHeight
 }
 
-const restoreOriginalSnapshot = async (progress) => {
-  const targetFirstId = progress.originalFirstChapterId || firstOriginalChapter.value?.id
-  const targetLastId = progress.originalLastChapterId || lastOriginalChapter.value?.id
-
-  let guard = 0
-  while (firstOriginalChapter.value?.id && targetFirstId && firstOriginalChapter.value.id !== targetFirstId && guard < 80) {
-    const beforeId = firstOriginalChapter.value.id
-    await loadPrevOriginalChapter(null, { restoring: true })
-    if (firstOriginalChapter.value?.id === beforeId) break
-    guard += 1
+const restoreOriginalAnchor = async (progress) => {
+  await nextTick()
+  const scrollTarget = originalWindowRef.value
+  const chapterId = progress.originalAnchorChapterId || progress.chapterId
+  if (!scrollTarget || !chapterId) return
+  const chapterEl = scrollTarget.querySelector(`[data-original-id="${chapterId}"]`)
+  if (!chapterEl) {
+    scrollTarget.scrollTop = Math.max(0, progress.scrollTop || 0)
+    return
   }
-
-  guard = 0
-  while (lastOriginalChapter.value?.id && targetLastId && lastOriginalChapter.value.id !== targetLastId && guard < 80) {
-    const beforeId = lastOriginalChapter.value.id
-    await loadNextOriginalChapter({ restoring: true })
-    if (lastOriginalChapter.value?.id === beforeId) break
-    guard += 1
-  }
+  scrollTarget.scrollTop = Math.max(0, chapterEl.offsetTop + (progress.originalAnchorOffset || 0))
 }
 
 const handleFileChange = (file) => {
@@ -1238,9 +1304,7 @@ const revealSingleMessage = async () => {
 const handleChatWindowClick = async () => {
   if (dialogueRevealMode.value === 'tap') {
     await revealSingleMessage()
-    return
   }
-  openReaderQuickPanel()
 }
 
 const switchReaderMode = async (mode) => {
@@ -1537,7 +1601,6 @@ const loadNextProcessedChapter = async (options = {}) => {
 
       await loadChapterForReader(nextChapter, true)
     if (!restoring) {
-      selectedChapter.value = nextChapter
       await nextTick()
       await fillChatViewport()
       saveReadingProgress()
@@ -1639,7 +1702,6 @@ const loadNextOriginalChapter = async (options = {}) => {
     loadedChapterMeta.value.set(nextChapter.id, detailRes.data)
     lastOriginalChapter.value = nextChapter
     if (!restoring) {
-      selectedChapter.value = nextChapter
       saveReadingProgress()
     }
   } catch (error) {
