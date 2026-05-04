@@ -170,7 +170,7 @@
             拆分章节
           </el-button>
           <el-button v-if="selectedNovelScope === 'owned' && canProcess" type="success" @click="openProcessDialog">选择章节解析</el-button>
-          <el-button v-if="selectedNovelScope === 'owned' && isProcessing" type="danger" plain :loading="cancellingProcess" @click="cancelProcess">取消解析</el-button>
+          <el-button v-if="selectedNovelScope === 'owned' && isProcessing" type="danger" plain :loading="isCancellingSelectedNovel" @click="cancelProcess">取消解析</el-button>
           <el-button
             v-if="selectedNovelScope === 'owned' && selectedNovel?.status === 'completed'"
             type="primary"
@@ -460,7 +460,7 @@
       </div>
       <template #footer>
         <el-button @click="hideProgressDialog">先放后台</el-button>
-        <el-button type="danger" plain @click="cancelProcess">取消解析</el-button>
+        <el-button type="danger" plain :loading="isCancellingSelectedNovel" @click="cancelProcess">取消解析</el-button>
       </template>
     </el-dialog>
     </template>
@@ -559,7 +559,7 @@ const showProgressDialog = ref(false)
 const showDeleteDialog = ref(false)
 const uploading = ref(false)
 const splitting = ref(false)
-const cancellingProcess = ref(false)
+const cancellingNovelId = ref(null)
 const deletingNovel = ref(false)
 const pendingDeleteNovel = ref(null)
 const globalLoading = ref(false)
@@ -603,6 +603,7 @@ const pageSubtitle = computed(() => {
 })
 
 const isProcessing = computed(() => selectedNovel.value?.status === 'processing')
+const isCancellingSelectedNovel = computed(() => cancellingNovelId.value === selectedNovel.value?.id)
 const canProcess = computed(() => selectedNovelScope.value === 'owned' && ['split', 'failed', 'cancelled', 'completed'].includes(selectedNovel.value?.status))
 const isChapterProcessing = (chapter) => {
   if (!isProcessing.value) return false
@@ -1014,35 +1015,6 @@ const toggleSquarePublish = async () => {
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
     ElMessage.error(error.response?.data?.error || '广场发布操作失败')
-  }
-}
-
-const promptSquarePublishAfterCompletion = async (novel) => {
-  if (!novel?.id || novel.is_public || selectedNovelScope.value !== 'owned') return
-  try {
-    await ElMessageBox.confirm(
-      `《${novel.title}》已经解析完成，是否现在上传到广场？`,
-      '上传到广场',
-      {
-        confirmButtonText: '上传',
-        cancelButtonText: '暂不上传',
-        type: 'success',
-      },
-    )
-  } catch (_error) {
-    return
-  }
-
-  try {
-    const res = await axios.post(`/api/novel/${novel.id}/square`)
-    selectedNovel.value = {
-      ...selectedNovel.value,
-      is_public: true,
-    }
-    await refreshHomeShelves()
-    ElMessage.success(res.data.message || '已发布到广场')
-  } catch (error) {
-    ElMessage.error(error.response?.data?.error || '上传到广场失败')
   }
 }
 
@@ -1757,8 +1729,8 @@ const startBatchProcess = async () => {
   }
 }
 
-const applyProcessStatusSnapshot = (data) => {
-  if (!selectedNovel.value) return
+const applyProcessStatusSnapshot = (data, novelId = selectedNovel.value?.id) => {
+  if (!selectedNovel.value || selectedNovel.value.id !== novelId) return
   selectedNovel.value = { ...selectedNovel.value, ...data }
   processProgress.value = data.progress
   processedCount.value = data.task_total_chapters ? data.task_processed_chapters : data.processed_chapters
@@ -1769,32 +1741,43 @@ const applyProcessStatusSnapshot = (data) => {
   }
 }
 
-const settleProcessAfterCancel = async () => {
-  if (!selectedNovel.value?.id || selectedNovelScope.value !== 'owned') return
-  for (let attempt = 0; attempt < 8; attempt += 1) {
-    const res = await axios.get(`/api/process/status/${selectedNovel.value.id}`)
-    applyProcessStatusSnapshot(res.data)
+const settleProcessAfterCancel = async (novelId) => {
+  if (!novelId) return false
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const res = await axios.get(`/api/process/status/${novelId}`)
+    applyProcessStatusSnapshot(res.data, novelId)
     if (['completed', 'split', 'failed', 'cancelled'].includes(res.data.status)) {
-      await checkProgress()
-      return
+      if (selectedNovel.value?.id === novelId && selectedNovelScope.value === 'owned') {
+        await checkProgress()
+      } else if (cancellingNovelId.value === novelId) {
+        cancellingNovelId.value = null
+      }
+      return true
     }
     await new Promise((resolve) => setTimeout(resolve, 700))
   }
-  await checkProgress()
+  return false
 }
 
 const cancelProcess = async () => {
-  if (!selectedNovel.value || cancellingProcess.value) return
-  cancellingProcess.value = true
+  if (!selectedNovel.value || cancellingNovelId.value === selectedNovel.value.id) return
+  const currentNovelId = selectedNovel.value.id
+  cancellingNovelId.value = currentNovelId
   try {
-    const res = await axios.post(`/api/process/${selectedNovel.value.id}/cancel`)
-    ElMessage.success(res.data.message || '已取消')
-    stopPolling()
-    await settleProcessAfterCancel()
+    const res = await axios.post(`/api/process/${currentNovelId}/cancel`)
+    ElMessage.success({
+      message: res.data.message || '已发送取消请求，正在等待后端结束当前章节解析',
+      duration: 4000,
+    })
+    const settled = await settleProcessAfterCancel(currentNovelId)
+    if (!settled && selectedNovel.value?.id === currentNovelId) {
+      startPolling()
+    }
   } catch (error) {
+    if (cancellingNovelId.value === currentNovelId) {
+      cancellingNovelId.value = null
+    }
     ElMessage.error(error.response?.data?.error || '取消失败')
-  } finally {
-    cancellingProcess.value = false
   }
 }
 
@@ -1860,6 +1843,9 @@ const checkProgress = async () => {
 
     if (['completed', 'split', 'failed', 'cancelled'].includes(res.data.status)) {
       stopPolling()
+      if (cancellingNovelId.value === selectedNovel.value?.id) {
+        cancellingNovelId.value = null
+      }
       showProgressDialog.value = false
       processingRange.value = { start: null, end: null }
       await refreshHomeShelves()
@@ -1869,7 +1855,7 @@ const checkProgress = async () => {
         window.scrollTo({ top: 0, behavior: 'smooth' })
       }
       const noticeKey = `${selectedNovel.value.id}:${res.data.status}:${res.data.task_processed_chapters || res.data.processed_chapters}`
-      if (lastProcessNoticeKey.value !== noticeKey) {
+      if (selectedNovelScope.value === 'owned' && lastProcessNoticeKey.value !== noticeKey) {
         lastProcessNoticeKey.value = noticeKey
         if (res.data.status === 'failed') {
           ElMessage.error('解析中断，请检查后端日志或大模型返回内容')
@@ -1877,14 +1863,15 @@ const checkProgress = async () => {
           ElMessage.warning('解析已取消')
         } else {
           ElMessage.success('解析任务已结束')
-          if (res.data.status === 'completed' && selectedNovelScope.value === 'owned' && !selectedNovel.value?.is_public) {
-            await promptSquarePublishAfterCompletion(selectedNovel.value)
-          }
         }
       }
     }
   } catch (error) {
-    stopPolling()
+    if (cancellingNovelId.value === selectedNovel.value?.id) {
+      startPolling()
+    } else {
+      stopPolling()
+    }
   }
 }
 
@@ -2418,22 +2405,21 @@ onBeforeUnmount(() => {
   flex-direction: column;
   align-items: flex-end;
   gap: 8px;
+  min-width: 196px;
 }
 
 .ai-config-action-row {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
+  display: grid;
   gap: 8px;
   width: 100%;
 }
 
 .ai-config-action-row--move {
-  justify-content: flex-end;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .ai-config-action-row--other {
-  justify-content: flex-end;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .ai-config-actions button,
@@ -2443,6 +2429,7 @@ onBeforeUnmount(() => {
 }
 
 .ai-config-actions button {
+  width: 100%;
   padding: 6px 10px;
   color: #244631;
   background: rgba(36, 70, 49, 0.08);
@@ -2454,12 +2441,28 @@ onBeforeUnmount(() => {
 }
 
 .ai-config-fixed-tag {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   padding: 6px 10px;
   border-radius: 999px;
   color: #6d7d74;
   background: rgba(36, 70, 49, 0.08);
   font-size: 12px;
   font-weight: 700;
+}
+
+@media (max-width: 640px) {
+  .ai-config-card {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .ai-config-actions {
+    align-items: stretch;
+    min-width: 0;
+    width: 100%;
+  }
 }
 
 .ai-config-editor {
