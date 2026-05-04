@@ -79,13 +79,14 @@
           <span>{{ novelTotal }} 本小说</span>
         </div>
         <div class="shelf-actions">
+          <button class="shelf-action muted" @click="openSquarePage">广场</button>
           <button class="shelf-action muted" @click="openModelDialog">模型</button>
           <button class="shelf-action" @click="openUploadDialog">添加</button>
         </div>
       </div>
 
       <div v-if="novels.length" class="novel-list shelf-grid">
-        <article v-for="novel in novels" :key="novel.id" class="novel-card" @click="selectNovel(novel)">
+        <article v-for="novel in novels" :key="novel.id" class="novel-card" @click="selectNovel(novel, 'owned')">
           <div class="book-cover">
             <div class="book-spine"></div>
             <div class="book-shine"></div>
@@ -101,7 +102,7 @@
             </div>
           </div>
           <div class="novel-actions">
-            <span>{{ novel.processed_chapters }}/{{ novel.total_chapters || 0 }}章</span>
+            <span>{{ novel.is_public ? '已公开' : `${novel.processed_chapters}/${novel.total_chapters || 0}章` }}</span>
             <button class="delete-link" @click.stop="deleteNovel(novel)">删除</button>
           </div>
         </article>
@@ -109,6 +110,49 @@
       <el-empty v-else description="还没有上传小说" />
       <div v-if="novelLoadingMore" class="list-loading">正在加载更多小说...</div>
       <div v-else-if="!novelHasMore && novels.length" class="list-loading">书架已全部加载</div>
+    </section>
+
+    <section v-if="currentPage === 'square'" class="page home-page square-page">
+      <div class="hero-card square-hero">
+        <div>
+          <p>广场书籍</p>
+          <h1>查看所有已公开的完整解析小说</h1>
+          <span>上传到广场后的小说将长期公开展示，其他用户可以直接进入只读阅读。</span>
+        </div>
+      </div>
+
+      <div class="shelf-header square-header">
+        <div>
+          <strong>广场书籍</strong>
+          <span>{{ squareNovelTotal }} 本公开小说</span>
+        </div>
+      </div>
+
+      <div v-if="squareNovels.length" class="novel-list shelf-grid square-grid">
+        <article v-for="novel in squareNovels" :key="`square-${novel.id}`" class="novel-card square-card" @click="selectNovel(novel, 'square')">
+          <div class="book-cover square-cover">
+            <div class="book-spine"></div>
+            <div class="book-shine"></div>
+            <span class="book-badge public-badge">广场</span>
+            <strong>{{ novel.title }}</strong>
+            <small>分享自 {{ novel.owner_username }}</small>
+          </div>
+          <div class="novel-main">
+            <h3>{{ novel.title }}</h3>
+            <p>作者：{{ novel.owner_username }}</p>
+            <div class="book-progress">
+              <i style="width: 100%"></i>
+            </div>
+          </div>
+          <div class="novel-actions">
+            <span>{{ novel.total_chapters || 0 }}章</span>
+            <span class="square-readonly">只读</span>
+          </div>
+        </article>
+      </div>
+      <el-empty v-else description="广场里暂时还没有公开小说" />
+      <div v-if="squareNovelLoadingMore" class="list-loading">正在加载更多广场小说...</div>
+      <div v-else-if="!squareNovelHasMore && squareNovels.length" class="list-loading">广场书籍已全部加载</div>
     </section>
 
     <section v-if="currentPage === 'chapters'" class="page chapters-page">
@@ -122,11 +166,19 @@
         </div>
         <el-progress :percentage="novelProgress" :stroke-width="10" />
         <div class="actions">
-          <el-button v-if="selectedNovel?.status === 'uploaded'" type="primary" :loading="splitting" @click="splitNovel">
+          <el-button v-if="selectedNovelScope === 'owned' && selectedNovel?.status === 'uploaded'" type="primary" :loading="splitting" @click="splitNovel">
             拆分章节
           </el-button>
-          <el-button v-if="canProcess" type="success" @click="openProcessDialog">选择章节解析</el-button>
-          <el-button v-if="isProcessing" type="danger" plain @click="cancelProcess">取消解析</el-button>
+          <el-button v-if="selectedNovelScope === 'owned' && canProcess" type="success" @click="openProcessDialog">选择章节解析</el-button>
+          <el-button v-if="selectedNovelScope === 'owned' && isProcessing" type="danger" plain :loading="cancellingProcess" @click="cancelProcess">取消解析</el-button>
+          <el-button
+            v-if="selectedNovelScope === 'owned' && selectedNovel?.status === 'completed'"
+            type="primary"
+            plain
+            @click="toggleSquarePublish"
+          >
+            {{ selectedNovel?.is_public ? '从广场下架' : '发布到广场' }}
+          </el-button>
         </div>
         <div class="chapter-jump">
           <el-input-number v-model="jumpChapterNumber" :min="1" :max="selectedNovel?.total_chapters || 1" />
@@ -152,7 +204,7 @@
             size="small"
             :type="chapter.is_processed ? 'warning' : 'primary'"
             plain
-            :disabled="isProcessing"
+            :disabled="isProcessing || selectedNovelScope === 'square'"
             @click.stop="processSingleChapter(chapter)"
           >
             {{ chapter.is_processed ? '重新解析' : '转换' }}
@@ -176,12 +228,8 @@
             <button @click="changeFontSize(1)">A+</button>
           </div>
           <div class="reader-tabs">
-            <button :class="{ active: contentTab === 'dialogue' }" @click="contentTab = 'dialogue'">群聊阅读</button>
-            <button :class="{ active: contentTab === 'original' }" @click="contentTab = 'original'">原文</button>
-          </div>
-          <div v-if="contentTab === 'dialogue'" class="dialogue-mode-switch">
-            <button :class="{ active: dialogueRevealMode === 'scroll' }" @click="setDialogueRevealMode('scroll')">滚动阅读</button>
-            <button :class="{ active: dialogueRevealMode === 'tap' }" @click="setDialogueRevealMode('tap')">点按收消息</button>
+            <button :class="{ active: contentTab === 'dialogue' }" @click="switchReaderMode('dialogue')">群聊阅读</button>
+            <button :class="{ active: contentTab === 'original' }" @click="switchReaderMode('original')">原文</button>
           </div>
         </div>
       </div>
@@ -190,7 +238,6 @@
         v-show="contentTab === 'dialogue'"
         ref="chatWindowRef"
         class="chat-window"
-        :class="{ 'tap-reveal-mode': dialogueRevealMode === 'tap' }"
         :style="readerStyle"
         @click="handleChatWindowClick"
         @scroll.passive="handleChatScroll"
@@ -213,7 +260,7 @@
               </div>
             </template>
           </div>
-          <div v-if="nextChapterLoading" class="reader-loading">正在进入下一章...</div>
+          <div v-if="nextChapterVisibleLoading" class="reader-loading">正在进入下一章...</div>
           <div v-if="prevChapterLoading" class="reader-loading">正在加载上一章...</div>
           <div v-if="readerEnded" class="reader-ending">已读到最后一章</div>
         </template>
@@ -242,10 +289,6 @@
           <div class="reader-quick-actions">
             <button :class="{ active: contentTab === 'dialogue' }" @click="switchReaderMode('dialogue')">群聊阅读</button>
             <button :class="{ active: contentTab === 'original' }" @click="switchReaderMode('original')">原文阅读</button>
-          </div>
-          <div v-if="contentTab === 'dialogue'" class="reader-quick-actions reader-quick-submodes">
-            <button :class="{ active: dialogueRevealMode === 'scroll' }" @click="setDialogueRevealMode('scroll')">滚动阅读</button>
-            <button :class="{ active: dialogueRevealMode === 'tap' }" @click="setDialogueRevealMode('tap')">点按收消息</button>
           </div>
           <div class="reader-quick-font">
             <button @click="changeFontSize(-1)">A-</button>
@@ -309,25 +352,63 @@
         <el-form-item label="昵称">
           <el-input v-model="userForm.username" placeholder="例如：小华" />
         </el-form-item>
-        <el-form-item label="供应商">
-          <el-select v-model="userForm.api_provider" placeholder="选择模型供应商" @change="applyProviderDefaults">
-            <el-option v-for="provider in modelProviders" :key="provider.provider" :label="provider.label" :value="provider.provider" />
-          </el-select>
-        </el-form-item>
-        <el-form-item label="模型">
-          <el-input v-model="userForm.api_model" placeholder="请填写模型名" />
-        </el-form-item>
-        <el-form-item label="Base URL">
-          <el-input v-model="userForm.api_base_url" placeholder="OpenAI 兼容接口地址" />
-        </el-form-item>
-        <el-form-item label="API Key">
-          <el-input v-model="userForm.api_key" type="password" show-password :placeholder="currentUser ? '不填则保留原 API Key' : '请输入 API Key'" />
-        </el-form-item>
+        <div class="ai-config-section">
+          <div class="ai-config-head">
+            <strong>AI 调用顺序</strong>
+            <button class="shelf-action" type="button" @click="openAiConfigEditor()">新增配置</button>
+          </div>
+          <div v-if="aiConfigs.length" class="ai-config-list">
+            <article v-for="(config, index) in aiConfigs" :key="config.id" class="ai-config-card">
+              <div class="ai-config-main">
+                <strong>{{ index + 1 }}. {{ config.name }}</strong>
+                <span>{{ config.provider }} / {{ config.model }}</span>
+                <small>{{ config.is_enabled ? '已启用' : '已停用' }}</small>
+              </div>
+              <div class="ai-config-actions">
+                <div class="ai-config-action-row ai-config-action-row--move">
+                  <button type="button" @click="moveAiConfig(config.id, -1)" :disabled="index === 0">上移</button>
+                  <button type="button" @click="moveAiConfig(config.id, 1)" :disabled="index === aiConfigs.length - 1">下移</button>
+                </div>
+                <div class="ai-config-action-row ai-config-action-row--other">
+                  <button type="button" @click="openAiConfigEditor(config)">编辑</button>
+                  <button v-if="!config.is_builtin" type="button" class="danger-text" @click="removeAiConfigConfirmed(config)">删除</button>
+                  <span v-else class="ai-config-fixed-tag">默认</span>
+                </div>
+              </div>
+            </article>
+          </div>
+          <div v-else class="ai-config-empty">还没有额外配置，解析时会先使用默认。</div>
+
+          <div v-if="aiConfigEditorOpen" class="ai-config-editor">
+            <el-form-item label="配置名">
+              <el-input v-model="aiConfigForm.name" placeholder="例如：主力 DeepSeek" />
+            </el-form-item>
+            <el-form-item label="供应商">
+              <el-select v-model="aiConfigForm.provider" placeholder="选择模型供应商" @change="applyAiConfigProviderDefaults">
+                <el-option v-for="provider in modelProviders" :key="provider.provider" :label="provider.label" :value="provider.provider" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="模型">
+              <el-input v-model="aiConfigForm.model" placeholder="请填写模型名" />
+            </el-form-item>
+            <el-form-item label="Base URL">
+              <el-input v-model="aiConfigForm.base_url" placeholder="OpenAI 兼容接口地址" />
+            </el-form-item>
+            <el-form-item label="API Key">
+              <el-input v-model="aiConfigForm.api_key" type="password" show-password :placeholder="aiConfigForm.id ? '不填则保留原 API Key' : '请输入 API Key'" />
+            </el-form-item>
+            <el-checkbox v-model="aiConfigForm.is_enabled">启用这个配置</el-checkbox>
+            <div class="ai-config-editor-actions">
+              <el-button @click="closeAiConfigEditor">取消</el-button>
+              <el-button type="primary" :loading="savingAiConfig" @click="saveAiConfig">验证并保存</el-button>
+            </div>
+          </div>
+        </div>
       </el-form>
       <template #footer>
         <el-button v-if="currentUser" @click="showUserDialog = false">取消</el-button>
         <el-button type="primary" :loading="savingUser" @click="saveUserConfig">
-          {{ savingUser ? '正在验证...' : currentUser ? '验证并保存' : '验证并注册' }}
+          {{ savingUser ? '正在保存...' : '保存昵称' }}
         </el-button>
       </template>
     </el-dialog>
@@ -388,7 +469,7 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import axios from 'axios'
 
 const currentPage = ref('novels')
@@ -418,12 +499,19 @@ const userForm = ref({
 })
 
 const novels = ref([])
+const squareNovels = ref([])
 const novelPage = ref(1)
 const novelPageSize = ref(20)
 const novelTotal = ref(0)
 const novelHasMore = ref(false)
 const novelLoadingMore = ref(false)
+const squareNovelPage = ref(1)
+const squareNovelPageSize = ref(12)
+const squareNovelTotal = ref(0)
+const squareNovelHasMore = ref(false)
+const squareNovelLoadingMore = ref(false)
 const selectedNovel = ref(null)
+const selectedNovelScope = ref('owned')
 const chapters = ref([])
 const selectedChapter = ref(null)
 const allDialogues = ref([])
@@ -435,10 +523,12 @@ const chapterTotal = ref(0)
 const chapterHasMore = ref(false)
 const chapterLoadingMore = ref(false)
 const visibleMessageCount = ref(0)
-const messageBatchSize = 10
 const tapRevealInitialCount = 4
 const tapRevealBottomGap = 92
+const nextChapterPrefetchThreshold = 5
 const nextChapterLoading = ref(false)
+const nextChapterVisibleLoading = ref(false)
+const nextChapterPrefetching = ref(false)
 const prevChapterLoading = ref(false)
 const readerEnded = ref(false)
 const readerAtStart = ref(false)
@@ -451,7 +541,6 @@ const chatWindowRef = ref(null)
 const originalWindowRef = ref(null)
 const readerToolsOpen = ref(false)
 const showReaderQuickPanel = ref(false)
-const dialogueRevealMode = ref('scroll')
 const restoringProgress = ref(false)
 const restoringReaderSnapshot = ref(false)
 const restoringProgressState = ref(null)
@@ -470,6 +559,7 @@ const showProgressDialog = ref(false)
 const showDeleteDialog = ref(false)
 const uploading = ref(false)
 const splitting = ref(false)
+const cancellingProcess = ref(false)
 const deletingNovel = ref(false)
 const pendingDeleteNovel = ref(null)
 const globalLoading = ref(false)
@@ -485,8 +575,22 @@ const totalCount = ref(0)
 const processingRange = ref({ start: null, end: null })
 const progressTimer = ref(null)
 const polling = ref(false)
+const lastProcessNoticeKey = ref('')
+const aiConfigs = ref([])
+const aiConfigEditorOpen = ref(false)
+const savingAiConfig = ref(false)
+const aiConfigForm = ref({
+  id: null,
+  name: '',
+  provider: 'deepseek',
+  base_url: 'https://api.deepseek.com',
+  model: 'deepseek-chat',
+  api_key: '',
+  is_enabled: true,
+})
 
 const pageTitle = computed(() => {
+  if (currentPage.value === 'square') return '广场书籍'
   if (currentPage.value === 'chapters') return selectedNovel.value?.title || '章节'
   if (currentPage.value === 'content') return selectedChapter.value?.title || '阅读'
   return '小说工坊'
@@ -499,7 +603,7 @@ const pageSubtitle = computed(() => {
 })
 
 const isProcessing = computed(() => selectedNovel.value?.status === 'processing')
-const canProcess = computed(() => ['split', 'failed', 'cancelled', 'completed'].includes(selectedNovel.value?.status))
+const canProcess = computed(() => selectedNovelScope.value === 'owned' && ['split', 'failed', 'cancelled', 'completed'].includes(selectedNovel.value?.status))
 const isChapterProcessing = (chapter) => {
   if (!isProcessing.value) return false
   const start = processingRange.value.start
@@ -522,6 +626,10 @@ const readerStyle = computed(() => ({
 }))
 const currentProvider = computed(() => modelProviders.value.find((item) => item.provider === userForm.value.api_provider))
 const currentAuthProvider = computed(() => modelProviders.value.find((item) => item.provider === authForm.value.api_provider))
+const currentAiConfigProvider = computed(() => modelProviders.value.find((item) => item.provider === aiConfigForm.value.provider))
+
+const chapterBasePath = computed(() => selectedNovelScope.value === 'square' ? '/api/square/chapter' : '/api/chapter')
+const novelBasePath = computed(() => selectedNovelScope.value === 'square' ? '/api/square/novel' : '/api/novel')
 
 const getNovelProgress = (novel) => {
   const total = novel.total_chapters || 0
@@ -574,14 +682,19 @@ const resetSessionState = () => {
   stopPolling()
   currentPage.value = 'novels'
   selectedNovel.value = null
+  selectedNovelScope.value = 'owned'
   selectedChapter.value = null
   novels.value = []
+  squareNovels.value = []
   chapters.value = []
   allDialogues.value = []
   originalChapters.value = []
   novelPage.value = 1
   novelTotal.value = 0
   novelHasMore.value = false
+  squareNovelPage.value = 1
+  squareNovelTotal.value = 0
+  squareNovelHasMore.value = false
 }
 
 const hydrateCurrentUser = async () => {
@@ -667,7 +780,7 @@ const submitAuth = async () => {
       : await axios.post('/api/users', payload)
     saveLocalUser(res.data.user, authMode.value === 'login' ? authRemember.value : true)
     ElMessage.success(authMode.value === 'login' ? '登录成功' : '注册成功')
-    await refreshNovels()
+    await refreshHomeShelves()
   } catch (error) {
     ElMessage.error(error.response?.data?.error || (authMode.value === 'login' ? '登录失败' : '注册失败'))
   } finally {
@@ -697,6 +810,7 @@ const openModelDialog = () => {
       api_model: currentUser.value.api_model || 'deepseek-chat',
       api_key: '',
     }
+    loadAiConfigs()
   }
   showUserDialog.value = true
 }
@@ -721,11 +835,214 @@ const saveUserConfig = async () => {
     saveLocalUser(res.data.user)
     showUserDialog.value = false
     ElMessage.success(currentUser.value ? '模型设置已保存' : '注册成功')
-    await refreshNovels()
+    await refreshHomeShelves()
   } catch (error) {
     ElMessage.error(error.response?.data?.error || '保存失败')
   } finally {
     savingUser.value = false
+  }
+}
+
+const applyAiConfigProviderDefaults = () => {
+  const provider = currentAiConfigProvider.value
+  if (!provider) return
+  aiConfigForm.value.base_url = provider.base_url
+  aiConfigForm.value.model = provider.models?.[0] || ''
+}
+
+const resetAiConfigForm = () => {
+  aiConfigForm.value = {
+    id: null,
+    name: '',
+    provider: 'deepseek',
+    base_url: 'https://api.deepseek.com',
+    model: 'deepseek-chat',
+    api_key: '',
+    is_enabled: true,
+  }
+}
+
+const loadAiConfigs = async () => {
+  if (!currentUser.value?.id) return
+  try {
+    const res = await axios.get(`/api/users/${currentUser.value.id}/ai-configs`)
+    aiConfigs.value = res.data || []
+  } catch (error) {
+    ElMessage.error(error.response?.data?.error || '获取 AI 配置失败')
+  }
+}
+
+const openAiConfigEditor = (config = null) => {
+  ensureModelProviders()
+  if (!config) {
+    resetAiConfigForm()
+  } else {
+    aiConfigForm.value = {
+      id: config.id,
+      name: config.name,
+      provider: config.provider,
+      base_url: config.base_url,
+      model: config.model,
+      api_key: '',
+      is_enabled: config.is_enabled,
+    }
+  }
+  aiConfigEditorOpen.value = true
+}
+
+const closeAiConfigEditor = () => {
+  aiConfigEditorOpen.value = false
+  resetAiConfigForm()
+}
+
+const saveAiConfig = async () => {
+  if (!currentUser.value?.id) return
+  const isEdit = !!aiConfigForm.value.id
+  if (!aiConfigForm.value.name.trim()) {
+    ElMessage.warning('请填写配置名')
+    return
+  }
+  if (!aiConfigForm.value.model.trim() || !aiConfigForm.value.base_url.trim()) {
+    ElMessage.warning('请填写完整的模型和 Base URL')
+    return
+  }
+  if (!aiConfigForm.value.id && !aiConfigForm.value.api_key.trim()) {
+    ElMessage.warning('新增配置时必须填写 API Key')
+    return
+  }
+  savingAiConfig.value = true
+  try {
+    const payload = { ...aiConfigForm.value }
+    const res = aiConfigForm.value.id
+      ? await axios.put(`/api/users/${currentUser.value.id}/ai-configs/${aiConfigForm.value.id}`, payload)
+      : await axios.post(`/api/users/${currentUser.value.id}/ai-configs`, payload)
+    if (res.data.user) {
+      saveLocalUser({ ...currentUser.value, ...res.data.user })
+    }
+    await loadAiConfigs()
+    closeAiConfigEditor()
+    ElMessage.success(isEdit ? '配置已更新' : '配置已新增')
+  } catch (error) {
+    ElMessage.error(error.response?.data?.error || '保存 AI 配置失败')
+  } finally {
+    savingAiConfig.value = false
+  }
+}
+
+const moveAiConfig = async (configId, direction) => {
+  if (!currentUser.value?.id) return
+  const currentIndex = aiConfigs.value.findIndex((item) => item.id === configId)
+  const targetIndex = currentIndex + direction
+  if (currentIndex < 0 || targetIndex < 0 || targetIndex >= aiConfigs.value.length) return
+  const ordered = [...aiConfigs.value]
+  const [item] = ordered.splice(currentIndex, 1)
+  ordered.splice(targetIndex, 0, item)
+  try {
+    const res = await axios.post(`/api/users/${currentUser.value.id}/ai-configs/reorder`, {
+      config_ids: ordered.map((entry) => entry.id),
+    })
+    aiConfigs.value = res.data.items || ordered
+    if (res.data.user) {
+      saveLocalUser({ ...currentUser.value, ...res.data.user })
+    }
+  } catch (error) {
+    ElMessage.error(error.response?.data?.error || '调整顺序失败')
+  }
+}
+
+const removeAiConfig = async (config) => {
+  if (!currentUser.value?.id) return
+  try {
+    await ElMessageBox.confirm(
+      `删除配置「${config.name}」后，这个配置将不能再参与自动兜底调用。`,
+      '确认删除配置',
+      {
+        confirmButtonText: '确认删除',
+        cancelButtonText: '取消',
+        type: 'warning',
+      },
+    )
+    const res = await axios.delete(`/api/users/${currentUser.value.id}/ai-configs/${config.id}`)
+    if (res.data.user) {
+      saveLocalUser({ ...currentUser.value, ...res.data.user })
+    }
+    await loadAiConfigs()
+    ElMessage.success('配置已删除')
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(error.response?.data?.error || '删除配置失败')
+  }
+}
+
+const removeAiConfigConfirmed = async (config) => {
+  try {
+    await ElMessageBox.confirm(`删除配置「${config.name}」后，这个配置将不再参与自动兜底调用。`, '确认删除配置', {
+      confirmButtonText: '确认删除',
+      cancelButtonText: '取消',
+      type: 'warning',
+    })
+  } catch (_error) {
+    return
+  }
+  await removeAiConfig(config)
+}
+
+const toggleSquarePublish = async () => {
+  if (!selectedNovel.value?.id || selectedNovelScope.value !== 'owned') return
+  try {
+    const isPublic = !!selectedNovel.value.is_public
+    await ElMessageBox.confirm(
+      isPublic
+        ? `确认将《${selectedNovel.value.title}》从广场下架吗？下架后其他用户将不能再从广场阅读。`
+        : `确认将《${selectedNovel.value.title}》上传到广场吗？上传后其他用户可以在广场中阅读。`,
+      isPublic ? '确认下架' : '确认上传',
+      {
+        confirmButtonText: isPublic ? '确认下架' : '确认上传',
+        cancelButtonText: '取消',
+        type: 'warning',
+      },
+    )
+    const res = isPublic
+      ? await axios.delete(`/api/novel/${selectedNovel.value.id}/square`)
+      : await axios.post(`/api/novel/${selectedNovel.value.id}/square`)
+    ElMessage.success(res.data.message || '操作成功')
+    selectedNovel.value = {
+      ...selectedNovel.value,
+      is_public: !isPublic,
+    }
+    await refreshHomeShelves()
+  } catch (error) {
+    if (error === 'cancel' || error === 'close') return
+    ElMessage.error(error.response?.data?.error || '广场发布操作失败')
+  }
+}
+
+const promptSquarePublishAfterCompletion = async (novel) => {
+  if (!novel?.id || novel.is_public || selectedNovelScope.value !== 'owned') return
+  try {
+    await ElMessageBox.confirm(
+      `《${novel.title}》已经解析完成，是否现在上传到广场？`,
+      '上传到广场',
+      {
+        confirmButtonText: '上传',
+        cancelButtonText: '暂不上传',
+        type: 'success',
+      },
+    )
+  } catch (_error) {
+    return
+  }
+
+  try {
+    const res = await axios.post(`/api/novel/${novel.id}/square`)
+    selectedNovel.value = {
+      ...selectedNovel.value,
+      is_public: true,
+    }
+    await refreshHomeShelves()
+    ElMessage.success(res.data.message || '已发布到广场')
+  } catch (error) {
+    ElMessage.error(error.response?.data?.error || '上传到广场失败')
   }
 }
 
@@ -759,10 +1076,53 @@ const refreshNovels = async () => {
   await fetchNovels(false)
 }
 
+const fetchSquareNovels = async (append = false) => {
+  if (squareNovelLoadingMore.value) return
+  squareNovelLoadingMore.value = true
+  try {
+    const res = await axios.get('/api/square/novels', {
+      params: {
+        page: squareNovelPage.value,
+        page_size: squareNovelPageSize.value,
+      },
+    })
+    const items = res.data.items || []
+    squareNovels.value = append ? [...squareNovels.value, ...items] : items
+    squareNovelTotal.value = res.data.total || 0
+    squareNovelHasMore.value = squareNovelPage.value < (res.data.pages || 0)
+  } catch (error) {
+    ElMessage.error(error.response?.data?.error || '获取广场书籍失败')
+  } finally {
+    squareNovelLoadingMore.value = false
+  }
+}
+
+const refreshSquareNovels = async () => {
+  squareNovelPage.value = 1
+  await fetchSquareNovels(false)
+}
+
+const refreshHomeShelves = async () => {
+  await Promise.all([refreshNovels(), refreshSquareNovels()])
+}
+
+const openSquarePage = async () => {
+  currentPage.value = 'square'
+  if (!squareNovels.value.length) {
+    await refreshSquareNovels()
+  }
+}
+
 const loadMoreNovels = async () => {
   if (currentPage.value !== 'novels' || !novelHasMore.value || novelLoadingMore.value) return
   novelPage.value += 1
   await fetchNovels(true)
+}
+
+const loadMoreSquareNovels = async () => {
+  if (currentPage.value !== 'novels' || !squareNovelHasMore.value || squareNovelLoadingMore.value) return
+  squareNovelPage.value += 1
+  await fetchSquareNovels(true)
 }
 
 const fetchChapters = async (append = false) => {
@@ -770,7 +1130,7 @@ const fetchChapters = async (append = false) => {
   if (chapterLoadingMore.value) return
   chapterLoadingMore.value = true
   try {
-    const res = await axios.get(`/api/novel/${selectedNovel.value.id}/chapters`, {
+    const res = await axios.get(`${novelBasePath.value}/${selectedNovel.value.id}/chapters`, {
       params: {
         page: chapterPage.value,
         page_size: chapterPageSize.value,
@@ -787,19 +1147,23 @@ const fetchChapters = async (append = false) => {
   }
 }
 
-const selectNovel = async (novel) => {
+const selectNovel = async (novel, scope = 'owned') => {
   resetNovelViewState()
+  lastProcessNoticeKey.value = ''
+  selectedNovelScope.value = scope
   selectedNovel.value = novel
   currentPage.value = 'chapters'
   chapterPage.value = 1
-  await syncProcessStatus()
+  if (scope === 'owned') {
+    await syncProcessStatus()
+  }
   await fetchChapters()
   if (novel.total_chapters > 0) {
     processConfig.value.startChapter = 1
     processConfig.value.endChapter = Math.min(10, novel.total_chapters)
     jumpChapterNumber.value = 1
   }
-  if (selectedNovel.value?.status === 'processing') {
+  if (scope === 'owned' && selectedNovel.value?.status === 'processing') {
     startPolling()
   }
 
@@ -818,6 +1182,7 @@ const resetNovelViewState = () => {
   chapterLoadingMore.value = false
   visibleMessageCount.value = 0
   nextChapterLoading.value = false
+  nextChapterVisibleLoading.value = false
   prevChapterLoading.value = false
   readerEnded.value = false
   readerAtStart.value = false
@@ -871,7 +1236,7 @@ const confirmDeleteNovel = async () => {
       currentPage.value = 'novels'
       stopPolling()
     }
-    await refreshNovels()
+    await refreshHomeShelves()
   } catch (error) {
     ElMessage.error(error.response?.data?.error || '删除失败')
   } finally {
@@ -896,6 +1261,7 @@ const resetReaderState = () => {
   originalChapters.value = []
   visibleMessageCount.value = 0
   nextChapterLoading.value = false
+  nextChapterVisibleLoading.value = false
   prevChapterLoading.value = false
   readerEnded.value = false
   readerAtStart.value = false
@@ -913,14 +1279,15 @@ const resetReaderState = () => {
   restoringProgressState.value = null
 }
 
-const loadChapterForReader = async (chapter, append) => {
+const loadChapterForReader = async (chapter, append, options = {}) => {
+  const prefetchOnly = !!options.prefetchOnly
   selectedChapter.value = chapter
   loadedChapterMeta.value.set(chapter.id, chapter)
   currentPage.value = 'content'
   contentTab.value = chapter.is_processed ? 'dialogue' : 'original'
 
   try {
-    const detailRes = await axios.get(`/api/chapter/${chapter.id}`)
+    const detailRes = await axios.get(`${chapterBasePath.value}/${chapter.id}`)
     chapterContent.value = detailRes.data.content || ''
     if (!append) {
       originalChapters.value = [detailRes.data]
@@ -932,7 +1299,7 @@ const loadChapterForReader = async (chapter, append) => {
     }
 
     if (chapter.is_processed) {
-      const dialogueRes = await axios.get(`/api/chapter/${chapter.id}/dialogues`)
+      const dialogueRes = await axios.get(`${chapterBasePath.value}/${chapter.id}/dialogues`)
       const chapterItems = [
         {
           id: `chapter-${chapter.id}`,
@@ -949,12 +1316,12 @@ const loadChapterForReader = async (chapter, append) => {
 
       if (append) {
         allDialogues.value = [...allDialogues.value, ...chapterItems]
-        if (restoringReaderSnapshot.value) {
+        if (prefetchOnly) {
           visibleMessageCount.value = Math.min(allDialogues.value.length, visibleMessageCount.value)
-        } else if (dialogueRevealMode.value === 'tap') {
+        } else if (restoringReaderSnapshot.value) {
           visibleMessageCount.value = Math.min(allDialogues.value.length, visibleMessageCount.value)
         } else {
-          visibleMessageCount.value = Math.min(allDialogues.value.length, visibleMessageCount.value + messageBatchSize)
+          visibleMessageCount.value = Math.min(allDialogues.value.length, visibleMessageCount.value)
         }
         lastLoadedChapter.value = chapter
       } else {
@@ -962,7 +1329,7 @@ const loadChapterForReader = async (chapter, append) => {
         const restoredVisibleCount = restoringProgressState.value?.dialogueRestoreCount || 0
         const initialVisibleCount = restoringReaderSnapshot.value
           ? restoredVisibleCount
-          : (dialogueRevealMode.value === 'tap' ? tapRevealInitialCount : messageBatchSize)
+          : tapRevealInitialCount
         visibleMessageCount.value = Math.min(
           Math.max(initialVisibleCount, 0),
           allDialogues.value.length,
@@ -979,7 +1346,6 @@ const loadChapterForReader = async (chapter, append) => {
         await nextTick()
         if (chatWindowRef.value) {
           await loadPrevProcessedChapter(chatWindowRef.value)
-          await fillChatViewport()
         }
       }
     } else {
@@ -998,6 +1364,17 @@ const getReadingProgress = () => {
   } catch (error) {
     return {}
   }
+}
+
+const prefetchNextProcessedChapter = async () => {
+  const remainingCount = allDialogues.value.length - visibleMessageCount.value
+  if (remainingCount > nextChapterPrefetchThreshold || nextChapterPrefetching.value || nextChapterLoading.value || readerEnded.value) return
+  nextChapterPrefetching.value = true
+  loadNextProcessedChapter({ prefetchOnly: true })
+    .catch(() => {})
+    .finally(() => {
+      nextChapterPrefetching.value = false
+    })
 }
 
 const getDialogueAnchor = (scrollTarget, chapterId) => {
@@ -1069,7 +1446,6 @@ const saveReadingProgress = () => {
   progress[selectedNovel.value.id] = {
     chapterId: selectedChapter.value.id,
     mode: contentTab.value,
-    dialogueRevealMode: dialogueRevealMode.value,
     scrollTop: scrollTarget?.scrollTop || 0,
     visibleMessageCount: visibleMessageCount.value,
     dialogueRestoreCount,
@@ -1092,8 +1468,7 @@ const restoreReadingProgress = async (novelId) => {
   restoringReaderSnapshot.value = true
   restoringProgressState.value = progress
   try {
-    dialogueRevealMode.value = progress.dialogueRevealMode || 'scroll'
-    const detailRes = await axios.get(`/api/chapter/${progress.chapterId}`)
+    const detailRes = await axios.get(`${chapterBasePath.value}/${progress.chapterId}`)
     await loadChapterForReader(detailRes.data, false)
     contentTab.value = progress.mode || 'dialogue'
     if (contentTab.value === 'dialogue' && detailRes.data.is_processed) {
@@ -1118,6 +1493,10 @@ const goBack = () => {
   saveReadingProgress()
   if (currentPage.value === 'content') {
     currentPage.value = 'chapters'
+    return
+  }
+  if (currentPage.value === 'square') {
+    currentPage.value = 'novels'
     return
   }
   if (currentPage.value === 'chapters') {
@@ -1198,7 +1577,7 @@ const uploadNovel = async () => {
     globalLoading.value = false
     ElMessage.success('上传成功，请进入书籍后手动拆分章节')
     uploadFile.value = null
-    await refreshNovels()
+    await refreshHomeShelves()
   } catch (error) {
     showUploadDialog.value = true
     ElMessage.error(error.response?.data?.error || '上传失败')
@@ -1214,7 +1593,7 @@ const splitNovel = async () => {
   try {
     const res = await axios.post(`/api/split/${selectedNovel.value.id}`)
     ElMessage.success(res.data.message)
-    await refreshNovels()
+    await refreshHomeShelves()
     await fetchChapters()
   } catch (error) {
     ElMessage.error(error.response?.data?.error || '拆分失败')
@@ -1242,25 +1621,6 @@ const jumpToChapter = async () => {
   }
 }
 
-const setDialogueRevealMode = async (mode) => {
-  dialogueRevealMode.value = mode
-  showReaderQuickPanel.value = false
-
-  if (contentTab.value !== 'dialogue') return
-
-  if (mode === 'tap') {
-    visibleMessageCount.value = Math.min(allDialogues.value.length, Math.max(visibleMessageCount.value, tapRevealInitialCount))
-    await nextTick()
-    if (chatWindowRef.value) {
-      await scrollChatToRevealPosition()
-    }
-  } else {
-    await fillChatViewport()
-  }
-
-  saveReadingProgress()
-}
-
 const openReaderQuickPanel = () => {
   if (currentPage.value !== 'content') return
   showReaderQuickPanel.value = true
@@ -1283,6 +1643,7 @@ const revealSingleMessage = async () => {
   if (visibleMessageCount.value < allDialogues.value.length) {
     visibleMessageCount.value += 1
     await nextTick()
+    prefetchNextProcessedChapter()
     await scrollChatToRevealPosition()
     saveReadingProgress()
     return true
@@ -1293,6 +1654,7 @@ const revealSingleMessage = async () => {
   if (allDialogues.value.length > beforeLength && visibleMessageCount.value < allDialogues.value.length) {
     visibleMessageCount.value += 1
     await nextTick()
+    prefetchNextProcessedChapter()
     await scrollChatToRevealPosition()
     saveReadingProgress()
     return true
@@ -1302,15 +1664,45 @@ const revealSingleMessage = async () => {
 }
 
 const handleChatWindowClick = async () => {
-  if (dialogueRevealMode.value === 'tap') {
-    await revealSingleMessage()
+  await revealSingleMessage()
+}
+
+const focusOriginalChapter = async (chapter) => {
+  if (!chapter) return
+  if (!loadedOriginalChapterIds.value.has(chapter.id)) {
+    const detailRes = await axios.get(`${chapterBasePath.value}/${chapter.id}`)
+    originalChapters.value = [detailRes.data]
+    loadedOriginalChapterIds.value = new Set([chapter.id])
+    loadedChapterMeta.value.set(chapter.id, detailRes.data)
+    firstOriginalChapter.value = chapter
+    lastOriginalChapter.value = chapter
+    originalAtStart.value = false
+    originalAtEnd.value = false
+    await loadPrevOriginalChapter(null, { restoring: true })
+  }
+  await nextTick()
+  if (!originalWindowRef.value) return
+  const currentSection = originalWindowRef.value.querySelector(`[data-original-id="${chapter.id}"]`)
+  if (currentSection) {
+    originalWindowRef.value.scrollTop = Math.max(0, currentSection.offsetTop)
+    await nextTick()
+    syncSelectedChapterFromOriginal(originalWindowRef.value)
   }
 }
 
 const switchReaderMode = async (mode) => {
   contentTab.value = mode
   showReaderQuickPanel.value = false
+  if (mode === 'original' && selectedChapter.value) {
+    await focusOriginalChapter(selectedChapter.value)
+  }
   await nextTick()
+  if (mode === 'original' && originalWindowRef.value) {
+    syncSelectedChapterFromOriginal(originalWindowRef.value)
+  }
+  if (mode === 'dialogue' && chatWindowRef.value) {
+    syncSelectedChapterFromChat(chatWindowRef.value)
+  }
   saveReadingProgress()
 }
 
@@ -1328,8 +1720,9 @@ const jumpToChapterFromReader = async () => {
 }
 
 const processSingleChapter = async (chapter) => {
+  if (selectedNovelScope.value !== 'owned') return
   try {
-    await axios.post(`/api/chapter/${chapter.id}/process`)
+    await axios.post(`${chapterBasePath.value}/${chapter.id}/process`)
     ElMessage.success(chapter.is_processed ? '已开始重新解析该章节' : '已开始转换该章节')
     showProgressDialog.value = true
     startPolling()
@@ -1364,14 +1757,44 @@ const startBatchProcess = async () => {
   }
 }
 
-const cancelProcess = async () => {
+const applyProcessStatusSnapshot = (data) => {
   if (!selectedNovel.value) return
+  selectedNovel.value = { ...selectedNovel.value, ...data }
+  processProgress.value = data.progress
+  processedCount.value = data.task_total_chapters ? data.task_processed_chapters : data.processed_chapters
+  totalCount.value = data.task_total_chapters || data.total_chapters
+  processingRange.value = {
+    start: data.task_start_chapter || null,
+    end: data.task_end_chapter || data.task_start_chapter || null,
+  }
+}
+
+const settleProcessAfterCancel = async () => {
+  if (!selectedNovel.value?.id || selectedNovelScope.value !== 'owned') return
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const res = await axios.get(`/api/process/status/${selectedNovel.value.id}`)
+    applyProcessStatusSnapshot(res.data)
+    if (['completed', 'split', 'failed', 'cancelled'].includes(res.data.status)) {
+      await checkProgress()
+      return
+    }
+    await new Promise((resolve) => setTimeout(resolve, 700))
+  }
+  await checkProgress()
+}
+
+const cancelProcess = async () => {
+  if (!selectedNovel.value || cancellingProcess.value) return
+  cancellingProcess.value = true
   try {
     const res = await axios.post(`/api/process/${selectedNovel.value.id}/cancel`)
     ElMessage.success(res.data.message || '已取消')
-    await checkProgress()
+    stopPolling()
+    await settleProcessAfterCancel()
   } catch (error) {
     ElMessage.error(error.response?.data?.error || '取消失败')
+  } finally {
+    cancellingProcess.value = false
   }
 }
 
@@ -1380,7 +1803,7 @@ const hideProgressDialog = () => {
 }
 
 const startPolling = () => {
-  if (!selectedNovel.value || polling.value) return
+  if (!selectedNovel.value || selectedNovelScope.value !== 'owned' || polling.value) return
   polling.value = true
   checkProgress()
   progressTimer.value = setInterval(checkProgress, 5000)
@@ -1395,7 +1818,7 @@ const stopPolling = () => {
 }
 
 const syncProcessStatus = async () => {
-  if (!selectedNovel.value?.id) return
+  if (!selectedNovel.value?.id || selectedNovelScope.value !== 'owned') return
   try {
     const res = await axios.get(`/api/process/status/${selectedNovel.value.id}`)
     selectedNovel.value = { ...selectedNovel.value, ...res.data }
@@ -1412,7 +1835,7 @@ const syncProcessStatus = async () => {
 }
 
 const checkProgress = async () => {
-  if (!selectedNovel.value) {
+  if (!selectedNovel.value || selectedNovelScope.value !== 'owned') {
     stopPolling()
     return
   }
@@ -1422,14 +1845,7 @@ const checkProgress = async () => {
     const oldProcessed = selectedNovel.value.processed_chapters || 0
     const oldTaskProcessed = selectedNovel.value.task_processed_chapters || 0
     const oldStatus = selectedNovel.value.status
-    selectedNovel.value = { ...selectedNovel.value, ...res.data }
-    processProgress.value = res.data.progress
-    processedCount.value = res.data.task_total_chapters ? res.data.task_processed_chapters : res.data.processed_chapters
-    totalCount.value = res.data.task_total_chapters || res.data.total_chapters
-    processingRange.value = {
-      start: res.data.task_start_chapter || null,
-      end: res.data.task_end_chapter || res.data.task_start_chapter || null,
-    }
+    applyProcessStatusSnapshot(res.data)
 
     if (
       currentPage.value === 'chapters' &&
@@ -1444,19 +1860,27 @@ const checkProgress = async () => {
 
     if (['completed', 'split', 'failed', 'cancelled'].includes(res.data.status)) {
       stopPolling()
+      showProgressDialog.value = false
       processingRange.value = { start: null, end: null }
-      await refreshNovels()
+      await refreshHomeShelves()
       if (currentPage.value === 'chapters') {
         chapterPage.value = 1
         await fetchChapters()
         window.scrollTo({ top: 0, behavior: 'smooth' })
       }
-      if (res.data.status === 'failed') {
-        ElMessage.error('解析中断，请检查后端日志或大模型返回内容')
-      } else if (res.data.status === 'cancelled') {
-        ElMessage.warning('解析已取消')
-      } else {
-        ElMessage.success('解析任务已结束')
+      const noticeKey = `${selectedNovel.value.id}:${res.data.status}:${res.data.task_processed_chapters || res.data.processed_chapters}`
+      if (lastProcessNoticeKey.value !== noticeKey) {
+        lastProcessNoticeKey.value = noticeKey
+        if (res.data.status === 'failed') {
+          ElMessage.error('解析中断，请检查后端日志或大模型返回内容')
+        } else if (res.data.status === 'cancelled') {
+          ElMessage.warning('解析已取消')
+        } else {
+          ElMessage.success('解析任务已结束')
+          if (res.data.status === 'completed' && selectedNovelScope.value === 'owned' && !selectedNovel.value?.is_public) {
+            await promptSquarePublishAfterCompletion(selectedNovel.value)
+          }
+        }
       }
     }
   } catch (error) {
@@ -1466,37 +1890,6 @@ const checkProgress = async () => {
 
 const isNarrator = (dialogue) => dialogue.character === '旁白'
 const getAvatar = (name) => (name || '人').slice(0, 1)
-
-const revealMoreMessages = () => {
-  if (visibleMessageCount.value < allDialogues.value.length) {
-    visibleMessageCount.value = Math.min(allDialogues.value.length, visibleMessageCount.value + messageBatchSize)
-    return true
-  }
-  return false
-}
-
-const fillChatViewport = async () => {
-  if (dialogueRevealMode.value === 'tap') return
-  await nextTick()
-  const target = chatWindowRef.value
-  if (!target) return
-
-  let guard = 0
-  while (target.scrollHeight <= target.clientHeight + 20 && guard < 20) {
-    const beforeLength = allDialogues.value.length
-    const beforeVisible = visibleMessageCount.value
-
-    if (!revealMoreMessages()) {
-      await loadNextProcessedChapter()
-    }
-
-    await nextTick()
-    if (beforeLength === allDialogues.value.length && beforeVisible === visibleMessageCount.value) {
-      break
-    }
-    guard += 1
-  }
-}
 
 const syncSelectedChapterFromChat = (scrollTarget) => {
   if (!scrollTarget) return
@@ -1549,17 +1942,9 @@ const handleChatScroll = async (event) => {
   if (!restoringProgress.value) saveReadingProgress()
   const target = event.target
   const nearTop = target.scrollTop <= 80
-  const nearBottom = target.scrollTop + target.clientHeight >= target.scrollHeight - 80
   if (nearTop && !prevChapterLoading.value) {
     await loadPrevProcessedChapter(target)
-    return
   }
-
-  if (!nearBottom || nextChapterLoading.value) return
-  if (dialogueRevealMode.value === 'tap') return
-
-  if (revealMoreMessages()) return
-  await loadNextProcessedChapter()
 }
 
 const handleWindowScroll = () => {
@@ -1567,6 +1952,14 @@ const handleWindowScroll = () => {
     const nearBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 160
     if (nearBottom) {
       loadMoreNovels()
+    }
+    return
+  }
+
+  if (currentPage.value === 'square') {
+    const nearBottom = window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 160
+    if (nearBottom) {
+      loadMoreSquareNovels()
     }
     return
   }
@@ -1584,12 +1977,14 @@ const changeFontSize = (delta) => {
 
 const loadNextProcessedChapter = async (options = {}) => {
   const restoring = !!options.restoring
+  const prefetchOnly = !!options.prefetchOnly
   const baseChapter = lastLoadedChapter.value || selectedChapter.value
   if (!baseChapter || nextChapterLoading.value || readerEnded.value) return
 
   nextChapterLoading.value = true
+  nextChapterVisibleLoading.value = !prefetchOnly
     try {
-      const res = await axios.get(`/api/chapter/${baseChapter.id}/next`, {
+      const res = await axios.get(`${chapterBasePath.value}/${baseChapter.id}/next`, {
         params: { processed_only: 1 },
       })
       const nextChapter = res.data.chapter
@@ -1599,16 +1994,15 @@ const loadNextProcessedChapter = async (options = {}) => {
       }
       if (loadedChapterIds.value.has(nextChapter.id)) return
 
-      await loadChapterForReader(nextChapter, true)
-    if (!restoring) {
-      await nextTick()
-      await fillChatViewport()
+      await loadChapterForReader(nextChapter, true, { prefetchOnly })
+    if (!restoring && !prefetchOnly) {
       saveReadingProgress()
     }
   } catch (error) {
     ElMessage.error(error.response?.data?.error || '自动加载下一章失败')
   } finally {
     nextChapterLoading.value = false
+    nextChapterVisibleLoading.value = false
   }
 }
 
@@ -1621,7 +2015,7 @@ const loadPrevProcessedChapter = async (scrollTarget, options = {}) => {
   const anchor = getScrollAnchor(scrollTarget)
 
     try {
-      const res = await axios.get(`/api/chapter/${baseChapter.id}/prev`, {
+      const res = await axios.get(`${chapterBasePath.value}/${baseChapter.id}/prev`, {
         params: { processed_only: 1 },
       })
       const prevChapter = res.data.chapter
@@ -1631,7 +2025,7 @@ const loadPrevProcessedChapter = async (scrollTarget, options = {}) => {
       }
       if (loadedChapterIds.value.has(prevChapter.id)) return
 
-      const dialogueRes = await axios.get(`/api/chapter/${prevChapter.id}/dialogues`)
+      const dialogueRes = await axios.get(`${chapterBasePath.value}/${prevChapter.id}/dialogues`)
     const prevItems = [
       {
         id: `chapter-${prevChapter.id}`,
@@ -1687,7 +2081,7 @@ const loadNextOriginalChapter = async (options = {}) => {
 
   nextOriginalLoading.value = true
   try {
-    const res = await axios.get(`/api/chapter/${baseChapter.id}/next`, {
+    const res = await axios.get(`${chapterBasePath.value}/${baseChapter.id}/next`, {
       params: { processed_only: 0 },
     })
     const nextChapter = res.data.chapter
@@ -1696,7 +2090,7 @@ const loadNextOriginalChapter = async (options = {}) => {
       return
     }
     if (loadedOriginalChapterIds.value.has(nextChapter.id)) return
-    const detailRes = await axios.get(`/api/chapter/${nextChapter.id}`)
+    const detailRes = await axios.get(`${chapterBasePath.value}/${nextChapter.id}`)
     originalChapters.value = [...originalChapters.value, detailRes.data]
     loadedOriginalChapterIds.value.add(nextChapter.id)
     loadedChapterMeta.value.set(nextChapter.id, detailRes.data)
@@ -1719,7 +2113,7 @@ const loadPrevOriginalChapter = async (scrollTarget, options = {}) => {
   prevOriginalLoading.value = true
   const anchor = getOriginalScrollAnchor(scrollTarget)
   try {
-    const res = await axios.get(`/api/chapter/${baseChapter.id}/prev`, {
+    const res = await axios.get(`${chapterBasePath.value}/${baseChapter.id}/prev`, {
       params: { processed_only: 0 },
     })
     const prevChapter = res.data.chapter
@@ -1728,7 +2122,7 @@ const loadPrevOriginalChapter = async (scrollTarget, options = {}) => {
       return
     }
     if (loadedOriginalChapterIds.value.has(prevChapter.id)) return
-    const detailRes = await axios.get(`/api/chapter/${prevChapter.id}`)
+    const detailRes = await axios.get(`${chapterBasePath.value}/${prevChapter.id}`)
     originalChapters.value = [detailRes.data, ...originalChapters.value]
     loadedOriginalChapterIds.value.add(prevChapter.id)
     loadedChapterMeta.value.set(prevChapter.id, detailRes.data)
@@ -1828,7 +2222,7 @@ const persistReadingBeforeLeave = () => {
 
 onMounted(() => {
   hydrateCurrentUser().then((hasValidUser) => {
-    if (hasValidUser) refreshNovels()
+    if (hasValidUser) refreshHomeShelves()
   })
   window.addEventListener('scroll', handleWindowScroll, { passive: true })
   window.addEventListener('beforeunload', persistReadingBeforeLeave)
@@ -1964,6 +2358,121 @@ onBeforeUnmount(() => {
   color: #708078;
   font-size: 12px;
   line-height: 1.5;
+}
+
+.ai-config-section {
+  margin-top: 10px;
+  padding: 14px;
+  border-radius: 18px;
+  background: rgba(234, 243, 236, 0.82);
+}
+
+.ai-config-head {
+  margin-bottom: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ai-config-head strong {
+  color: #224530;
+}
+
+.ai-config-list {
+  display: grid;
+  gap: 10px;
+}
+
+.ai-config-card {
+  padding: 12px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid rgba(69, 104, 79, 0.09);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.ai-config-main {
+  display: grid;
+  gap: 4px;
+}
+
+.ai-config-main strong {
+  color: #1b3827;
+  font-size: 14px;
+}
+
+.ai-config-main span,
+.ai-config-main small,
+.ai-config-empty,
+.square-readonly {
+  color: #6a7c72;
+  font-size: 12px;
+}
+
+.ai-config-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.ai-config-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+  width: 100%;
+}
+
+.ai-config-action-row--move {
+  justify-content: flex-end;
+}
+
+.ai-config-action-row--other {
+  justify-content: flex-end;
+}
+
+.ai-config-actions button,
+.ai-config-editor-actions :deep(button) {
+  border: 0;
+  border-radius: 999px;
+}
+
+.ai-config-actions button {
+  padding: 6px 10px;
+  color: #244631;
+  background: rgba(36, 70, 49, 0.08);
+  cursor: pointer;
+}
+
+.danger-text {
+  color: #b24545 !important;
+}
+
+.ai-config-fixed-tag {
+  padding: 6px 10px;
+  border-radius: 999px;
+  color: #6d7d74;
+  background: rgba(36, 70, 49, 0.08);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.ai-config-editor {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px dashed rgba(58, 88, 67, 0.18);
+}
+
+.ai-config-editor-actions {
+  margin-top: 14px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
 }
 
 .auth-submit {
@@ -2150,6 +2659,20 @@ onBeforeUnmount(() => {
   box-shadow: 0 6px 18px rgba(24, 45, 34, 0.08);
 }
 
+.square-header {
+  margin-top: 26px;
+}
+
+.square-page .square-header {
+  margin-top: 18px;
+}
+
+.square-hero {
+  background:
+    radial-gradient(circle at 90% 10%, rgba(112, 198, 224, 0.22), transparent 24%),
+    linear-gradient(135deg, rgba(28, 84, 110, 0.94), rgba(85, 154, 183, 0.9));
+}
+
 .section-title {
   margin: 20px 2px 10px;
   font-weight: 900;
@@ -2236,6 +2759,32 @@ onBeforeUnmount(() => {
   color: rgba(255, 255, 255, 0.92);
   font-size: 11px;
   backdrop-filter: blur(8px);
+}
+
+.public-badge {
+  background: rgba(255, 246, 210, 0.24);
+  color: #fff6d0;
+}
+
+.square-cover {
+  background:
+    linear-gradient(90deg, rgba(0, 0, 0, 0.16), transparent 16%),
+    radial-gradient(circle at 80% 8%, rgba(255, 255, 255, 0.42), transparent 28%),
+    linear-gradient(145deg, #255c76 0%, #5ba9c7 52%, #d8efe9 100%);
+}
+
+.square-card .novel-actions {
+  align-items: center;
+}
+
+.square-readonly {
+  font-weight: 700;
+}
+
+.square-lock-tip {
+  color: #60766a;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .book-cover small {
@@ -2592,15 +3141,9 @@ onBeforeUnmount(() => {
   width: min(760px, 100%);
   height: calc(100vh - 112px);
   margin: 0 auto;
-  padding: 8px 14px 26px;
+  padding: 56px 14px 118px;
   overflow-y: auto;
   overscroll-behavior: contain;
-}
-
-.chat-window.tap-reveal-mode {
-  position: relative;
-  padding-top: 56px;
-  padding-bottom: 118px;
 }
 
 .reader-toolbar.expanded + .chat-window {

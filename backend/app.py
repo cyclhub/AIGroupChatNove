@@ -22,8 +22,8 @@ app = Flask(__name__)
 CORS(app)
 
 DB_USER = os.getenv("MYSQL_USER", "root")
-DB_PASSWORD = quote_plus(os.getenv("MYSQL_PASSWORD", "500231Wdl/0614"))
-DB_HOST = os.getenv("MYSQL_HOST", "180.184.28.119")
+DB_PASSWORD = quote_plus(os.getenv("MYSQL_PASSWORD", ""))
+DB_HOST = os.getenv("MYSQL_HOST", "")
 DB_PORT = os.getenv("MYSQL_PORT", "3306")
 DB_NAME = os.getenv("MYSQL_DATABASE", "aixs")
 
@@ -114,6 +114,21 @@ class User(db.Model):
     updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
 
 
+class UserAIConfig(db.Model):
+    __tablename__ = "user_ai_configs"
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    name = db.Column(db.String(120), nullable=False, default="默认")
+    provider = db.Column(db.String(50), default="deepseek")
+    base_url = db.Column(db.String(255), nullable=False)
+    model = db.Column(db.String(100), nullable=False)
+    api_key = db.Column(db.String(512), nullable=False)
+    sort_order = db.Column(db.Integer, default=1, nullable=False)
+    is_enabled = db.Column(db.Boolean, default=True)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+    updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
+
+
 class Novel(db.Model):
     __tablename__ = "novels"
     id = db.Column(db.Integer, primary_key=True)
@@ -145,6 +160,15 @@ class DialogueFlow(db.Model):
     character = db.Column(db.String(100))
     text = db.Column(LONGTEXT)
     created_at = db.Column(db.DateTime, default=datetime.now)
+
+
+class NovelSquareEntry(db.Model):
+    __tablename__ = "novel_square_entries"
+    id = db.Column(db.Integer, primary_key=True)
+    novel_id = db.Column(db.Integer, db.ForeignKey("novels.id"), nullable=False, unique=True, index=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("users.id"), nullable=False, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.now)
+    updated_at = db.Column(db.DateTime, default=datetime.now, onupdate=datetime.now)
 
 
 with app.app_context():
@@ -252,7 +276,11 @@ def process_one_chapter(chapter_id: int, previous_result: str | None = None) -> 
     if reference is None:
         reference = previous_chapter_result(chapter.novel_id, chapter.chapter_number)
 
-    dialogues = convert_chapter(chapter.content or "", reference, user_ai_config(novel.user_id if novel else None))
+    dialogues = convert_chapter_with_fallback(
+        chapter.content or "",
+        reference,
+        user_ai_configs(novel.user_id if novel else None),
+    )
     result = save_dialogues(chapter, dialogues)
     refresh_processed_count(chapter.novel_id)
     return result
@@ -402,6 +430,29 @@ def owned_chapter_or_404(chapter_id: int) -> "Chapter":
     return chapter
 
 
+def square_entry_for_novel(novel_id: int) -> NovelSquareEntry | None:
+    return NovelSquareEntry.query.filter_by(novel_id=novel_id).first()
+
+
+def public_novel_or_404(novel_id: int) -> "Novel":
+    novel = Novel.query.get(novel_id)
+    if not novel:
+        abort(404)
+    square_entry = square_entry_for_novel(novel_id)
+    if not square_entry or not novel.total_chapters or novel.processed_chapters < novel.total_chapters:
+        abort(404)
+    return novel
+
+
+def public_chapter_or_404(chapter_id: int) -> "Chapter":
+    chapter = Chapter.query.get(chapter_id)
+    if not chapter:
+        abort(404)
+    if not square_entry_for_novel(chapter.novel_id):
+        abort(404)
+    return chapter
+
+
 def mask_api_key(api_key: str | None) -> str:
     if not api_key:
         return ""
@@ -434,6 +485,114 @@ def user_ai_config(user_id: int | None) -> dict:
         "base_url": user.api_base_url,
         "model": user.api_model,
     }
+
+
+def ai_config_to_dict(config: UserAIConfig) -> dict:
+    first_config_id = (
+        db.session.query(UserAIConfig.id)
+        .filter_by(user_id=config.user_id)
+        .order_by(UserAIConfig.id.asc())
+        .limit(1)
+        .scalar()
+    )
+    return {
+        "id": config.id,
+        "name": config.name,
+        "provider": config.provider,
+        "base_url": config.base_url,
+        "model": config.model,
+        "api_key_masked": mask_api_key(config.api_key),
+        "sort_order": config.sort_order,
+        "is_enabled": bool(config.is_enabled),
+        "is_builtin": config.id == first_config_id,
+        "created_at": config.created_at.strftime("%Y-%m-%d %H:%M:%S") if config.created_at else "",
+    }
+
+
+def ensure_user_ai_configs(user: User | None) -> list[UserAIConfig]:
+    if not user:
+        return []
+    configs = UserAIConfig.query.filter_by(user_id=user.id).order_by(UserAIConfig.sort_order, UserAIConfig.id).all()
+    if configs:
+        return configs
+    if user.api_key and user.api_base_url and user.api_model:
+        config = UserAIConfig(
+            user_id=user.id,
+            name="默认",
+            provider=user.api_provider or "deepseek",
+            base_url=user.api_base_url,
+            model=user.api_model,
+            api_key=user.api_key,
+            sort_order=1,
+            is_enabled=True,
+        )
+        db.session.add(config)
+        db.session.commit()
+        return [config]
+    return []
+
+
+def sync_user_primary_ai_config(user: User | None) -> None:
+    if not user:
+        return
+    configs = ensure_user_ai_configs(user)
+    primary = next((item for item in configs if item.is_enabled), None) or (configs[0] if configs else None)
+    if not primary:
+        return
+    user.api_provider = primary.provider
+    user.api_base_url = primary.base_url
+    user.api_model = primary.model
+    user.api_key = primary.api_key
+    user.updated_at = datetime.now()
+
+
+def user_ai_configs(user_id: int | None) -> list[dict]:
+    user = User.query.get(user_id) if user_id else None
+    if not user:
+        raise ValueError("当前小说没有绑定有效用户，请先完成注册后再解析章节")
+    configs = ensure_user_ai_configs(user)
+    enabled_configs = [item for item in configs if item.is_enabled]
+    if not enabled_configs:
+        raise ValueError("当前账号还没有可用的 AI 配置，请先在模型设置中新增并启用至少一个配置")
+    return [
+        {
+            "id": item.id,
+            "name": item.name,
+            "provider": item.provider,
+            "api_key": item.api_key,
+            "base_url": item.base_url,
+            "model": item.model,
+            "sort_order": item.sort_order,
+        }
+        for item in enabled_configs
+    ]
+
+
+def user_ai_config(user_id: int | None) -> dict:
+    return user_ai_configs(user_id)[0]
+
+
+def convert_chapter_with_fallback(content: str, previous_result: str, configs: list[dict]) -> list[dict]:
+    errors: list[str] = []
+    for index, config in enumerate(configs, 1):
+        try:
+            return convert_chapter(content, previous_result, config)
+        except Exception as exc:
+            config_name = config.get("name") or f"配置 {index}"
+            errors.append(f"{index}. {config_name}（{config.get('model') or 'unknown'}）：{exc}")
+    raise RuntimeError("所有 AI 配置调用都失败了：\n" + "\n".join(errors))
+
+
+def convert_chapter_with_fallback(content: str, previous_result: str, configs: list[dict]) -> list[dict]:
+    errors: list[str] = []
+    for index, config in enumerate(configs, 1):
+        try:
+            return convert_chapter(content, previous_result, config)
+        except Exception as exc:
+            config_name = config.get("name") or f"Config {index}"
+            model_name = config.get("model") or "unknown"
+            errors.append(f"{index}. {config_name} ({model_name}): {exc}")
+    raise RuntimeError("All AI configs failed:\n" + "\n".join(errors))
 
 
 @app.route("/api/model-providers", methods=["GET"])
@@ -476,6 +635,19 @@ def create_user():
         api_key=api_key,
     )
     db.session.add(user)
+    db.session.flush()
+    db.session.add(
+        UserAIConfig(
+            user_id=user.id,
+            name=(payload.get("config_name") or "默认").strip() or "默认",
+            provider=user.api_provider,
+            base_url=user.api_base_url,
+            model=user.api_model,
+            api_key=user.api_key,
+            sort_order=1,
+            is_enabled=True,
+        )
+    )
     db.session.commit()
     return jsonify({"success": True, "user": user_to_dict(user)})
 
@@ -544,11 +716,17 @@ def update_user_model(user_id):
         return jsonify({"error": "用户名已存在"}), 400
 
     user.username = new_username
-    user.api_provider = payload.get("api_provider") or user.api_provider
-    user.api_base_url = new_base_url
-    user.api_model = new_model
-    user.api_key = new_api_key
-    user.updated_at = datetime.now()
+    configs = ensure_user_ai_configs(user)
+    primary = configs[0] if configs else None
+    if primary:
+        primary.name = (payload.get("config_name") or primary.name or "默认").strip() or "默认"
+        primary.provider = payload.get("api_provider") or primary.provider
+        primary.base_url = new_base_url
+        primary.model = new_model
+        primary.api_key = new_api_key
+        primary.is_enabled = True
+        primary.updated_at = datetime.now()
+    sync_user_primary_ai_config(user)
     db.session.commit()
     return jsonify({"success": True, "user": user_to_dict(user)})
 
@@ -568,6 +746,149 @@ def validate_model():
     except Exception as exc:
         return jsonify({"success": False, "error": f"模型验证失败：{exc}"}), 400
     return jsonify({"success": True, "message": "模型验证成功"})
+
+
+@app.route("/api/users/<int:user_id>/profile", methods=["PUT"])
+@require_login
+def update_user_profile(user_id):
+    user = current_user_or_401()
+    if user.id != user_id:
+        abort(404)
+    payload = request.get_json(silent=True) or {}
+    new_username = (payload.get("username") or user.username).strip()
+    if not new_username:
+        return jsonify({"error": "请输入账号名"}), 400
+    if new_username != user.username and User.query.filter_by(username=new_username).first():
+        return jsonify({"error": "用户名已存在"}), 400
+    user.username = new_username
+    user.updated_at = datetime.now()
+    db.session.commit()
+    return jsonify({"success": True, "user": user_to_dict(user)})
+
+
+@app.route("/api/users/<int:user_id>/ai-configs", methods=["GET"])
+@require_login
+def get_user_ai_configs(user_id):
+    user = current_user_or_401()
+    if user.id != user_id:
+        abort(404)
+    configs = ensure_user_ai_configs(user)
+    return jsonify([ai_config_to_dict(item) for item in configs])
+
+
+@app.route("/api/users/<int:user_id>/ai-configs", methods=["POST"])
+@require_login
+def create_user_ai_config(user_id):
+    user = current_user_or_401()
+    if user.id != user_id:
+        abort(404)
+    payload = request.get_json(silent=True) or {}
+    name = (payload.get("name") or "").strip() or "未命名配置"
+    provider = (payload.get("provider") or "deepseek").strip() or "deepseek"
+    base_url = (payload.get("base_url") or "").strip()
+    model = (payload.get("model") or "").strip()
+    api_key = (payload.get("api_key") or "").strip()
+    is_enabled = bool(payload.get("is_enabled", True))
+    try:
+        validate_ai_config({"api_key": api_key, "base_url": base_url, "model": model})
+    except Exception as exc:
+        return jsonify({"error": f"模型验证失败：{exc}"}), 400
+    max_order = db.session.query(db.func.max(UserAIConfig.sort_order)).filter_by(user_id=user.id).scalar() or 0
+    config = UserAIConfig(
+        user_id=user.id,
+        name=name,
+        provider=provider,
+        base_url=base_url,
+        model=model,
+        api_key=api_key,
+        sort_order=max_order + 1,
+        is_enabled=is_enabled,
+    )
+    db.session.add(config)
+    db.session.flush()
+    sync_user_primary_ai_config(user)
+    db.session.commit()
+    return jsonify({"success": True, "config": ai_config_to_dict(config), "user": user_to_dict(user)})
+
+
+@app.route("/api/users/<int:user_id>/ai-configs/<int:config_id>", methods=["PUT"])
+@require_login
+def update_user_ai_config(user_id, config_id):
+    user = current_user_or_401()
+    if user.id != user_id:
+        abort(404)
+    config = UserAIConfig.query.filter_by(id=config_id, user_id=user.id).first_or_404()
+    payload = request.get_json(silent=True) or {}
+    new_name = (payload.get("name") or config.name).strip() or "未命名配置"
+    new_provider = (payload.get("provider") or config.provider).strip() or config.provider
+    new_base_url = (payload.get("base_url") or config.base_url).strip()
+    new_model = (payload.get("model") or config.model).strip()
+    new_api_key = (payload.get("api_key") or config.api_key).strip()
+    new_is_enabled = bool(payload.get("is_enabled", config.is_enabled))
+    try:
+        validate_ai_config({"api_key": new_api_key, "base_url": new_base_url, "model": new_model})
+    except Exception as exc:
+        return jsonify({"error": f"模型验证失败：{exc}"}), 400
+    config.name = new_name
+    config.provider = new_provider
+    config.base_url = new_base_url
+    config.model = new_model
+    config.api_key = new_api_key
+    config.is_enabled = new_is_enabled
+    config.updated_at = datetime.now()
+    sync_user_primary_ai_config(user)
+    db.session.commit()
+    return jsonify({"success": True, "config": ai_config_to_dict(config), "user": user_to_dict(user)})
+
+
+@app.route("/api/users/<int:user_id>/ai-configs/reorder", methods=["POST"])
+@require_login
+def reorder_user_ai_configs(user_id):
+    user = current_user_or_401()
+    if user.id != user_id:
+        abort(404)
+    payload = request.get_json(silent=True) or {}
+    ordered_ids = payload.get("config_ids") or []
+    configs = UserAIConfig.query.filter_by(user_id=user.id).all()
+    config_map = {item.id: item for item in configs}
+    if sorted(config_map.keys()) != sorted(ordered_ids):
+        return jsonify({"error": "配置顺序参数不完整"}), 400
+    for index, config_id in enumerate(ordered_ids, 1):
+        config_map[config_id].sort_order = index
+        config_map[config_id].updated_at = datetime.now()
+    sync_user_primary_ai_config(user)
+    db.session.commit()
+    ordered_items = UserAIConfig.query.filter_by(user_id=user.id).order_by(UserAIConfig.sort_order, UserAIConfig.id).all()
+    return jsonify({"success": True, "items": [ai_config_to_dict(item) for item in ordered_items], "user": user_to_dict(user)})
+
+
+@app.route("/api/users/<int:user_id>/ai-configs/<int:config_id>", methods=["DELETE"])
+@require_login
+def delete_user_ai_config(user_id, config_id):
+    user = current_user_or_401()
+    if user.id != user_id:
+        abort(404)
+    config = UserAIConfig.query.filter_by(id=config_id, user_id=user.id).first_or_404()
+    first_config_id = (
+        db.session.query(UserAIConfig.id)
+        .filter_by(user_id=user.id)
+        .order_by(UserAIConfig.id.asc())
+        .limit(1)
+        .scalar()
+    )
+    if config.id == first_config_id:
+        return jsonify({"error": "注册时创建的默认模型配置只能编辑，不能删除"}), 400
+    remaining = UserAIConfig.query.filter(UserAIConfig.user_id == user.id, UserAIConfig.id != config_id).count()
+    if remaining <= 0:
+        return jsonify({"error": "至少保留一个 AI 配置"}), 400
+    db.session.delete(config)
+    db.session.flush()
+    configs = UserAIConfig.query.filter_by(user_id=user.id).order_by(UserAIConfig.sort_order, UserAIConfig.id).all()
+    for index, item in enumerate(configs, 1):
+        item.sort_order = index
+    sync_user_primary_ai_config(user)
+    db.session.commit()
+    return jsonify({"success": True, "user": user_to_dict(user)})
 
 
 @app.route("/api/upload", methods=["POST"])
@@ -671,7 +992,7 @@ def process_novel(novel_id):
         novel.user_id = current_user.id
         db.session.commit()
     try:
-        user_ai_config(novel.user_id)
+        user_ai_configs(novel.user_id)
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
@@ -700,6 +1021,7 @@ def delete_novel(novel_id):
     cancel_process(novel_id)
 
     try:
+        NovelSquareEntry.query.filter_by(novel_id=novel_id).delete()
         chapters = Chapter.query.filter_by(novel_id=novel_id).all()
         chapter_ids = [chapter.id for chapter in chapters]
         if chapter_ids:
@@ -718,6 +1040,31 @@ def delete_novel(novel_id):
         return jsonify({"error": str(exc)}), 500
 
 
+@app.route("/api/novel/<int:novel_id>/square", methods=["POST"])
+@require_login
+def publish_novel_to_square(novel_id):
+    novel = owned_novel_or_404(novel_id)
+    if not novel.total_chapters or novel.processed_chapters < novel.total_chapters:
+        return jsonify({"error": "只有整本解析完成的小说才能发布到广场"}), 400
+    entry = square_entry_for_novel(novel.id)
+    if not entry:
+        entry = NovelSquareEntry(novel_id=novel.id, user_id=novel.user_id or current_user_or_401().id)
+        db.session.add(entry)
+        db.session.commit()
+    return jsonify({"success": True, "message": "已发布到广场"})
+
+
+@app.route("/api/novel/<int:novel_id>/square", methods=["DELETE"])
+@require_login
+def unpublish_novel_from_square(novel_id):
+    novel = owned_novel_or_404(novel_id)
+    deleted = NovelSquareEntry.query.filter_by(novel_id=novel.id).delete()
+    db.session.commit()
+    if not deleted:
+        return jsonify({"success": True, "message": "这本书当前不在广场中"})
+    return jsonify({"success": True, "message": "已从广场下架"})
+
+
 @app.route("/api/novels", methods=["GET"])
 @require_login
 def get_novels():
@@ -728,6 +1075,10 @@ def get_novels():
     query = query.order_by(Novel.upload_time.desc())
     total = query.count()
     novels = query.offset((page - 1) * page_size).limit(page_size).all()
+    public_novel_ids = {
+        item.novel_id
+        for item in NovelSquareEntry.query.filter(NovelSquareEntry.novel_id.in_([novel.id for novel in novels])).all()
+    } if novels else set()
     items = [
             {
                 "id": novel.id,
@@ -735,6 +1086,7 @@ def get_novels():
                 "total_chapters": novel.total_chapters,
                 "processed_chapters": novel.processed_chapters,
                 "status": novel.status,
+                "is_public": novel.id in public_novel_ids,
                 "upload_time": novel.upload_time.strftime("%Y-%m-%d %H:%M:%S"),
             }
             for novel in novels
@@ -748,6 +1100,84 @@ def get_novels():
             "pages": (total + page_size - 1) // page_size if page_size else 0,
         }
     )
+
+
+@app.route("/api/square/novels", methods=["GET"])
+@require_login
+def get_square_novels():
+    page = max(int(request.args.get("page", 1)), 1)
+    page_size = min(max(int(request.args.get("page_size", 20)), 1), 100)
+    try:
+        query = (
+            db.session.query(NovelSquareEntry, Novel, User)
+            .join(Novel, NovelSquareEntry.novel_id == Novel.id)
+            .join(User, NovelSquareEntry.user_id == User.id)
+            .filter(Novel.total_chapters > 0, Novel.processed_chapters >= Novel.total_chapters)
+            .order_by(NovelSquareEntry.created_at.desc())
+        )
+        total = query.count()
+        rows = query.offset((page - 1) * page_size).limit(page_size).all()
+        items = [
+            {
+                "id": novel.id,
+                "title": novel.title,
+                "total_chapters": novel.total_chapters,
+                "processed_chapters": novel.processed_chapters,
+                "status": novel.status,
+                "is_public": True,
+                "owner_username": user.username,
+                "upload_time": novel.upload_time.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            for _entry, novel, user in rows
+        ]
+        return jsonify(
+            {
+                "items": items,
+                "page": page,
+                "page_size": page_size,
+                "total": total,
+                "pages": (total + page_size - 1) // page_size if page_size else 0,
+            }
+        )
+    except Exception as exc:
+        db.session.rollback()
+        try:
+            db.create_all()
+            query = (
+                db.session.query(NovelSquareEntry, Novel, User)
+                .join(Novel, NovelSquareEntry.novel_id == Novel.id)
+                .join(User, NovelSquareEntry.user_id == User.id)
+                .filter(Novel.total_chapters > 0, Novel.processed_chapters >= Novel.total_chapters)
+                .order_by(NovelSquareEntry.created_at.desc())
+            )
+            total = query.count()
+            rows = query.offset((page - 1) * page_size).limit(page_size).all()
+            items = [
+                {
+                    "id": novel.id,
+                    "title": novel.title,
+                    "total_chapters": novel.total_chapters,
+                    "processed_chapters": novel.processed_chapters,
+                    "status": novel.status,
+                    "is_public": True,
+                    "owner_username": user.username,
+                    "upload_time": novel.upload_time.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                for _entry, novel, user in rows
+            ]
+            return jsonify(
+                {
+                    "items": items,
+                    "page": page,
+                    "page_size": page_size,
+                    "total": total,
+                    "pages": (total + page_size - 1) // page_size if page_size else 0,
+                }
+            )
+        except Exception as retry_exc:
+            db.session.rollback()
+            app.logger.exception("获取广场书籍失败: %s", retry_exc)
+            return jsonify({"error": "获取广场书籍失败，请检查后端数据库初始化状态"}), 500
 
 
 @app.route("/api/novel/<int:novel_id>/chapters", methods=["GET"])
@@ -890,10 +1320,133 @@ def get_prev_chapter(chapter_id):
     )
 
 
+@app.route("/api/square/novel/<int:novel_id>/chapters", methods=["GET"])
+@require_login
+def get_square_chapters(novel_id):
+    public_novel_or_404(novel_id)
+    page = max(int(request.args.get("page", 1)), 1)
+    page_size = min(max(int(request.args.get("page_size", 20)), 1), 100)
+    query = Chapter.query.filter_by(novel_id=novel_id).order_by(Chapter.chapter_number)
+    total = query.count()
+    chapters = query.offset((page - 1) * page_size).limit(page_size).all()
+    items = [
+        {
+            "id": chapter.id,
+            "novel_id": chapter.novel_id,
+            "chapter_number": chapter.chapter_number,
+            "title": chapter.title,
+            "is_processed": chapter.is_processed,
+        }
+        for chapter in chapters
+    ]
+    return jsonify(
+        {
+            "items": items,
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "pages": (total + page_size - 1) // page_size if page_size else 0,
+        }
+    )
+
+
+@app.route("/api/square/chapter/<int:chapter_id>", methods=["GET"])
+@require_login
+def get_square_chapter_detail(chapter_id):
+    chapter = public_chapter_or_404(chapter_id)
+    return jsonify(
+        {
+            "id": chapter.id,
+            "novel_id": chapter.novel_id,
+            "chapter_number": chapter.chapter_number,
+            "title": chapter.title,
+            "content": chapter.content,
+            "is_processed": chapter.is_processed,
+        }
+    )
+
+
+@app.route("/api/square/chapter/<int:chapter_id>/dialogues", methods=["GET"])
+@require_login
+def get_square_dialogues(chapter_id):
+    public_chapter_or_404(chapter_id)
+    rows = DialogueFlow.query.filter_by(chapter_id=chapter_id).order_by(DialogueFlow.sequence).all()
+    return jsonify(
+        [
+            {
+                "id": row.id,
+                "character": row.character,
+                "text": row.text,
+                "sequence": row.sequence,
+            }
+            for row in rows
+        ]
+    )
+
+
+@app.route("/api/square/chapter/<int:chapter_id>/next", methods=["GET"])
+@require_login
+def get_square_next_chapter(chapter_id):
+    chapter = public_chapter_or_404(chapter_id)
+    processed_only = request.args.get("processed_only", "1") != "0"
+    query = Chapter.query.filter(
+        Chapter.novel_id == chapter.novel_id,
+        Chapter.chapter_number > chapter.chapter_number,
+    )
+    if processed_only:
+        query = query.filter(Chapter.is_processed.is_(True))
+    next_chapter = query.order_by(Chapter.chapter_number).first()
+    if not next_chapter:
+        return jsonify({"chapter": None})
+    return jsonify(
+        {
+            "chapter": {
+                "id": next_chapter.id,
+                "novel_id": next_chapter.novel_id,
+                "chapter_number": next_chapter.chapter_number,
+                "title": next_chapter.title,
+                "is_processed": next_chapter.is_processed,
+            }
+        }
+    )
+
+
+@app.route("/api/square/chapter/<int:chapter_id>/prev", methods=["GET"])
+@require_login
+def get_square_prev_chapter(chapter_id):
+    chapter = public_chapter_or_404(chapter_id)
+    processed_only = request.args.get("processed_only", "1") != "0"
+    query = Chapter.query.filter(
+        Chapter.novel_id == chapter.novel_id,
+        Chapter.chapter_number < chapter.chapter_number,
+    )
+    if processed_only:
+        query = query.filter(Chapter.is_processed.is_(True))
+    prev_chapter = query.order_by(Chapter.chapter_number.desc()).first()
+    if not prev_chapter:
+        return jsonify({"chapter": None})
+    return jsonify(
+        {
+            "chapter": {
+                "id": prev_chapter.id,
+                "novel_id": prev_chapter.novel_id,
+                "chapter_number": prev_chapter.chapter_number,
+                "title": prev_chapter.title,
+                "is_processed": prev_chapter.is_processed,
+            }
+        }
+    )
+
+
 @app.route("/api/chapter/<int:chapter_id>/process", methods=["POST"])
 @require_login
 def process_single_chapter(chapter_id):
     chapter = owned_chapter_or_404(chapter_id)
+    novel = Novel.query.get(chapter.novel_id)
+    try:
+        user_ai_configs(novel.user_id if novel else None)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     started = start_process_thread(chapter.novel_id, chapter.chapter_number, chapter.chapter_number)
     return jsonify({"success": True, "message": "开始转换该章节" if started else "这本小说已有解析任务正在运行"})
 
